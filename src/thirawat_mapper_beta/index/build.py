@@ -12,6 +12,7 @@ import pyarrow as pa
 
 from thirawat_mapper_beta.io import read_concept_profiles
 from thirawat_mapper_beta.models import SapBERTEmbedder
+from thirawat_mapper_beta.utils import normalize_text_value
 
 
 def _normalize_multi_value(values: Sequence[str]) -> list[str]:
@@ -36,6 +37,7 @@ def _fixed_size_list(vectors: np.ndarray) -> pa.FixedSizeListArray:
 def build_index(args: argparse.Namespace) -> None:
     domain_ids = _normalize_multi_value(args.domain_id)
     concept_class_ids = _normalize_multi_value(args.concept_class_id)
+    extra_columns = _normalize_multi_value(args.extra_column)
 
     df = read_concept_profiles(
         args.duckdb,
@@ -43,11 +45,14 @@ def build_index(args: argparse.Namespace) -> None:
         concepts_table=args.concepts_table,
         domain_ids=domain_ids,
         concept_class_ids=concept_class_ids,
-        extra_profile_columns=args.extra_column,
+        extra_profile_columns=extra_columns,
     )
 
     if df.empty:
         raise SystemExit("No rows matched the provided filters; nothing to index")
+
+    # Normalize profile_text for indexing
+    df["profile_text"] = df["profile_text"].astype("string").apply(normalize_text_value)
 
     embedder = SapBERTEmbedder(device=args.device, batch_size=args.batch_size)
     vectors = embedder.encode(df["profile_text"].tolist())
@@ -58,7 +63,7 @@ def build_index(args: argparse.Namespace) -> None:
         "vector": _fixed_size_list(vectors),
     }
 
-    for column in args.extra_column:
+    for column in extra_columns:
         if column in df.columns:
             table_data[column] = pa.array(df[column])
 
@@ -78,7 +83,7 @@ def build_index(args: argparse.Namespace) -> None:
         "concepts_table": args.concepts_table,
         "domain_id": list(domain_ids),
         "concept_class_id": list(concept_class_ids),
-        "extra_columns": list(args.extra_column),
+        "extra_columns": list(extra_columns),
         "vector_dim": vectors.shape[1],
         "count": len(df),
         "model_id": embedder.model_id,
@@ -111,7 +116,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--extra-column",
         action="append",
         default=[],
-        help="Additional profile columns to carry into the LanceDB table",
+        help="Additional profile columns (comma-separated or repeat flag) to carry into the LanceDB table",
     )
     parser.add_argument("--batch-size", type=int, default=256, help="Embedding batch size")
     parser.add_argument("--device", default=None, help="torch device, e.g. cuda or cpu")

@@ -34,11 +34,21 @@ class _ThirawatPylateScorer:
 
     def encode_query(self, text: str):
         tok = self.model.tokenize([text], is_query=True, pad=True)
+        try:
+            device = next(self.model.parameters()).device
+            tok = {k: (v.to(device) if hasattr(v, 'to') else v) for k, v in tok.items()}
+        except Exception:
+            pass
         out = self.model(tok)
         return out["token_embeddings"], out.get("attention_mask")
 
     def encode_docs(self, texts: List[str]):
         tok = self.model.tokenize(texts, is_query=False, pad=False)
+        try:
+            device = next(self.model.parameters()).device
+            tok = {k: (v.to(device) if hasattr(v, 'to') else v) for k, v in tok.items()}
+        except Exception:
+            pass
         out = self.model(tok)
         return out["token_embeddings"], out.get("attention_mask")
 
@@ -51,12 +61,6 @@ class ThirawatReranker:
         device: str | None = None,
         return_score: str = "all",
         column: str = "profile_text",
-        pooling: str = "bms",
-        temperature: float = 20.0,
-        topk: Optional[int] = None,
-        symmetric_merge: str = "avg",
-        bidir_alpha: float = 0.5,
-        ngrams: Optional[str] = None,
     ) -> None:
         self.model_id = model_id
         self.device = device
@@ -64,17 +68,6 @@ class ThirawatReranker:
         # LanceDB inspects `.score` to decide output columns
         self.score = return_score
         self.column = column
-        self.pooling = pooling
-        self.temperature = float(temperature)
-        self.topk = int(topk) if (topk is not None and int(topk) > 0) else None
-        self.symmetric_merge = symmetric_merge
-        self.bidir_alpha = float(bidir_alpha)
-        self.ngrams = None
-        if isinstance(ngrams, str) and ngrams.strip():
-            try:
-                self.ngrams = [int(x.strip()) for x in ngrams.split(",") if x.strip()]
-            except Exception:
-                self.ngrams = None
 
         # Lazy-load scorer to avoid import cost on module import
         self._scorer: Optional[_ThirawatPylateScorer] = None
@@ -104,20 +97,8 @@ class ThirawatReranker:
 
         q_emb, q_mask = self.scorer.encode_query(qtext)
         d_emb, d_mask = self.scorer.encode_docs(texts)
-        # Map public pooling aliases to internal kinds
-        pooling = str(self.pooling).lower().strip()
-        if pooling in {"bms"}:
-            pooling = "symmetric_max"
         with torch.no_grad():
-            scores = bms_scores(
-                q_emb, d_emb, q_mask, d_mask,
-                pooling=pooling,
-                temperature=self.temperature,
-                topk=self.topk,
-                bidir_alpha=self.bidir_alpha,
-                symmetric_merge=self.symmetric_merge,
-                ngrams=self.ngrams,
-            )
+            scores = bms_scores(q_emb, d_emb, q_mask, d_mask)
         scores = scores.detach().float().cpu().numpy().reshape(-1)
         df = vector_results.to_pandas()
         df["_relevance_score"] = scores.astype(np.float32)

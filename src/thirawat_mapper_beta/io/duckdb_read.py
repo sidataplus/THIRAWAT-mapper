@@ -27,7 +27,7 @@ def read_concept_profiles(
     concept_class_ids: Optional[Iterable[str]] = None,
     extra_profile_columns: Sequence[str] = (),
 ) -> pd.DataFrame:
-    """Return concept profiles with optional domain/class filters.
+    """Return concept profiles joined to the OMOP concept table.
 
     Parameters
     ----------
@@ -36,8 +36,7 @@ def read_concept_profiles(
     profiles_table:
         Table containing ``concept_id`` and ``profile_text`` columns.
     concepts_table:
-        Optional OMOP ``concept`` table enabling ``domain_id`` and
-        ``concept_class_id`` filtering.
+        OMOP ``concept`` table name. When omitted, defaults to ``concept``.
     domain_ids / concept_class_ids:
         Iterable of allowed values. When provided, ``concepts_table`` must be
         set. Values are compared case-sensitively.
@@ -53,12 +52,6 @@ def read_concept_profiles(
     domain_ids_list = _as_list(domain_ids)
     class_ids_list = _as_list(concept_class_ids)
 
-    if (domain_ids_list or class_ids_list) and not concepts_table:
-        raise ValueError(
-            "concepts_table must be provided when domain_id or concept_class_id "
-            "filters are requested"
-        )
-
     duckdb_path = Path(duckdb_path)
     if not duckdb_path.exists():
         raise FileNotFoundError(f"DuckDB database not found: {duckdb_path}")
@@ -69,15 +62,21 @@ def read_concept_profiles(
 
     query = ["SELECT ", ", ".join(select_cols), f" FROM {profiles_table} p"]
 
+    # Always join to the concept table to enforce standard/valid filters
+    ctable = concepts_table or "concept"
+    query.append(f" JOIN {ctable} c USING(concept_id)")
+
     filters: List[str] = []
-    if concepts_table:
-        query.append(f" JOIN {concepts_table} c USING(concept_id)")
-        if domain_ids_list:
-            values = ",".join(f"'{v}'" for v in domain_ids_list)
-            filters.append(f"c.domain_id IN ({values})")
-        if class_ids_list:
-            values = ",".join(f"'{v}'" for v in class_ids_list)
-            filters.append(f"c.concept_class_id IN ({values})")
+    # Always keep only standard concepts that are valid (OMOP convention)
+    filters.append("c.standard_concept = 'S'")
+    filters.append("c.invalid_reason IS NULL")
+
+    if domain_ids_list:
+        values = ",".join(f"'{v}'" for v in domain_ids_list)
+        filters.append(f"c.domain_id IN ({values})")
+    if class_ids_list:
+        values = ",".join(f"'{v}'" for v in class_ids_list)
+        filters.append(f"c.concept_class_id IN ({values})")
 
     if filters:
         query.append(" WHERE ")

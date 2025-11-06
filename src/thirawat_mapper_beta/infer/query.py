@@ -9,7 +9,55 @@ import pandas as pd
 
 from thirawat_mapper_beta.models import SapBERTEmbedder, ThirawatReranker
 from thirawat_mapper_beta.scoring import batch_features
-from thirawat_mapper_beta.utils import connect_table
+from thirawat_mapper_beta.utils import connect_table, normalize_text_value
+
+
+def _resolve_device(name: str | None) -> str:
+    """Return best-available device: cuda → mps → cpu, with runtime sanity checks."""
+    try:
+        import torch
+        wanted = (name or "auto").lower()
+        has_cuda = torch.cuda.is_available()
+        has_mps = bool(getattr(torch.backends, "mps", None)) and torch.backends.mps.is_available()
+
+        def _ok(dev: str) -> bool:
+            try:
+                torch.tensor([0], device=dev)
+                return True
+            except Exception:
+                return False
+
+        if wanted in ("", "auto", "none"):
+            if has_cuda and _ok("cuda"):
+                return "cuda"
+            if has_mps and _ok("mps"):
+                return "mps"
+            return "cpu"
+        if wanted == "cuda":
+            if has_cuda and _ok("cuda"):
+                return "cuda"
+            return "mps" if has_mps and _ok("mps") else "cpu"
+        if wanted == "mps":
+            if has_mps and _ok("mps"):
+                return "mps"
+            return "cuda" if has_cuda and _ok("cuda") else "cpu"
+        return "cpu"
+    except Exception:
+        return "cpu"
+
+
+def _configure_torch_for_infer(device: str) -> None:
+    """Set fast matmul/TF32 knobs when safe to improve GPU utilization."""
+    try:
+        import torch
+        torch.set_float32_matmul_precision("high")
+        if device == "cuda":
+            try:
+                torch.backends.cuda.matmul.allow_tf32 = True  # type: ignore[attr-defined]
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def _format_row(row: pd.Series) -> str:
@@ -22,8 +70,10 @@ def _format_row(row: pd.Series) -> str:
 
 def run(args: argparse.Namespace) -> None:
     table, vector_column = connect_table(args.db, args.table)
-    embedder = SapBERTEmbedder(device=args.device, batch_size=args.batch_size)
-    reranker = ThirawatReranker(device=args.device, return_score="all", pooling="bms", temperature=20.0)
+    device = _resolve_device(args.device)
+    _configure_torch_for_infer(device)
+    embedder = SapBERTEmbedder(device=device, batch_size=args.batch_size)
+    reranker = ThirawatReranker(device=device, return_score="all")
 
     print("Type a query (':q' to exit).")
     while True:
@@ -37,7 +87,8 @@ def run(args: argparse.Namespace) -> None:
         if query in {":q", ":quit", ":exit"}:
             break
 
-        vector = embedder.encode([query])[0]
+        query_norm = normalize_text_value(query)
+        vector = embedder.encode([query_norm])[0]
         builder = table.search(
             vector.astype(float).tolist(),
             vector_column_name=vector_column,
@@ -47,7 +98,7 @@ def run(args: argparse.Namespace) -> None:
             result_table = (
                 builder.distance_type("cosine")
                 .limit(args.candidate_topk)
-                .rerank(reranker=reranker, query_string=query)
+                .rerank(reranker=reranker, query_string=query_norm)
                 .limit(args.candidate_topk)
                 .to_arrow()
             )
@@ -68,7 +119,8 @@ def run(args: argparse.Namespace) -> None:
         if keep_cols:
             df = df.loc[:, keep_cols]
 
-        features = batch_features(query, df["profile_text"].astype(str).tolist())
+        cands_text = [normalize_text_value(t) for t in df["profile_text"].astype(str).tolist()]
+        features = batch_features(query_norm, cands_text)
         df["strength_sim"] = [feat["strength_sim"] for feat in features]
         df["jaccard_text"] = [feat["jaccard_text"] for feat in features]
         # Per-query min-max normalization for simple features
@@ -101,7 +153,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--table", required=True, help="LanceDB table name")
     parser.add_argument("--candidate-topk", type=int, default=100, help="Candidate pool size")
     parser.add_argument("--show-topk", type=int, default=10, help="Number of rows to display")
-    parser.add_argument("--device", default=None, help="torch device (cuda or cpu)")
+    parser.add_argument("--device", default="auto", help="Device: auto|cuda|mps|cpu (default: auto)")
     parser.add_argument("--batch-size", type=int, default=64, help="Embedding batch size")
     return parser.parse_args(argv)
 
