@@ -188,11 +188,11 @@ def export_relabel_csv(
                 block_df = pd.DataFrame(rows_block, columns=[rank_header, query_text, source_code])
                 blocks.append({"gold_rank": gold_rank, "source_code": source_code, "frame": block_df})
 
-            def sort_key(item: dict) -> tuple[float, str]:
+            def sort_key(item: dict) -> tuple[int, float, str]:
                 gr = item["gold_rank"]
                 if gr is None:
-                    return (-1e12, item["source_code"])  # unmatched first
-                return (-float(gr), item["source_code"])  # descending rank
+                    return (1, float("inf"), item["source_code"])  # unmatched last
+                return (0, float(gr), item["source_code"])  # matched first, lower rank first
 
             frames = [b["frame"] for b in sorted(blocks, key=sort_key)] if blocks else []
             if frames:

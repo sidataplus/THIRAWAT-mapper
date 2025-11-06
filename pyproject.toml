@@ -39,6 +39,9 @@ dependencies = [
   "tqdm>=4.66",
 ]
 
+[tool.uv]
+dev-dependencies = ["pytest>=8.0"]
+
 [project.urls]
 Repository = "https://sidata.plus/projects/thirawat-mapper-beta"
 Issues = "https://sidata.plus/support"

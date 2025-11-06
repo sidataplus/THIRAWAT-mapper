@@ -55,7 +55,7 @@ def build_index(args: argparse.Namespace) -> None:
     df["profile_text"] = df["profile_text"].astype("string").apply(normalize_text_value)
 
     embedder = SapBERTEmbedder(device=args.device, batch_size=args.batch_size)
-    vectors = embedder.encode(df["profile_text"].tolist())
+    vectors = embedder.encode(df["profile_text"].tolist(), progress=True)
 
     table_data = {
         "concept_id": pa.array(df["concept_id"].astype("int64")),

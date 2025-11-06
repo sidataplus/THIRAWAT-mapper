@@ -45,8 +45,11 @@ class SapBERTEmbedder:
             self._model = model
         return self._model
 
-    def encode(self, texts: Sequence[str]) -> np.ndarray:
-        """Return L2-normalised CLS embeddings as float32."""
+    def encode(self, texts: Sequence[str], progress: bool = False) -> np.ndarray:
+        """Return L2-normalised CLS embeddings as float32.
+
+        When ``progress`` is True, a tqdm progress bar is displayed.
+        """
 
         if not texts:
             hidden = self.model.config.hidden_size
@@ -56,8 +59,14 @@ class SapBERTEmbedder:
         tokenizer = self.tokenizer
         model = self.model
 
+        iterator = range(0, len(texts), self.batch_size)
+        if progress:
+            from tqdm.auto import tqdm
+
+            iterator = tqdm(iterator, desc="Embed", unit="batch")
+
         with torch.no_grad():
-            for start in range(0, len(texts), self.batch_size):
+            for start in iterator:
                 batch = list(texts[start : start + self.batch_size])
                 encoded = tokenizer(
                     batch,
