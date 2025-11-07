@@ -133,6 +133,9 @@ General RAG knobs:
 #### Cloudflare Workers AI (remote)
 
 ```
+export CLOUDFLARE_ACCOUNT_ID=<ACCOUNT_ID>
+export CLOUDFLARE_API_TOKEN=<API_TOKEN>
+
 uv run python -m thirawat_mapper_beta.infer.bulk \
   --db data/lancedb/drug_major \
   --table drug_major \
@@ -140,23 +143,22 @@ uv run python -m thirawat_mapper_beta.infer.bulk \
   --out runs/a10_cf_rag \
   --n-limit 100 \
   --rag-provider cloudflare \
-  --cloudflare-account-id <ACCOUNT_ID> \
-  --cloudflare-api-token <API_TOKEN> \
   --rag-model openai/gpt-oss-20b
 ```
 
 Cloudflare-specific flags:
 
 ```
---cloudflare-account-id ACCOUNT
---cloudflare-api-token TOKEN
 --cloudflare-base-url https://api.cloudflare.com/client/v4
 --cloudflare-use-responses-api / --no-cloudflare-use-responses-api
 --gpt-reasoning-effort {low,medium,high}
 --cf-reasoning-summary {auto,concise,detailed}
 ```
 
-Environment variables `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` are honored if the flags are omitted.
+Set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in your environment before invoking the Cloudflare provider; the CLI reads only from those variables.
+
+- Models under `@cf/openai/*` (for example `@cf/openai/gpt-oss-120b`) use the Workers AI Responses API, so leave `--cloudflare-use-responses-api` enabled to send the prompt as an `input` payload.
+- Meta's `@cf/meta/llama-4-*` family is served via the `/ai/run/<model>` endpoint—pass `--no-cloudflare-use-responses-api` when targeting those models so the CLI emits the `messages` payload the endpoint expects.
 
 #### Ollama (local GGUF/chat server)
 

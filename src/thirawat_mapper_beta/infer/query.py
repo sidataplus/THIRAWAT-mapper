@@ -16,9 +16,15 @@ from .utils import configure_torch_for_infer, minmax_normalize, resolve_device
 def _format_row(row: pd.Series) -> str:
     concept_id = row.get("concept_id")
     name = row.get("concept_name") or row.get("profile_text")
-    score = row.get("final_score")
-    sim = row.get("strength_sim")
-    return f"{concept_id:<12} | {score:6.3f} | {sim:5.3f} | {name}" if pd.notna(score) else f"{concept_id:<12} | {name}"
+    final = row.get("final_score")
+    strength = row.get("strength_sim")
+    jac = row.get("jaccard_text")
+    brand = row.get("brand_score")
+    if pd.notna(final):
+        return (
+            f"{concept_id:<12} | {final:6.3f} | {strength:5.3f} | {jac:5.3f} | {brand:5.2f} | {name}"
+        )
+    return f"{concept_id:<12} | {name}"
 
 
 def run(args: argparse.Namespace) -> None:
@@ -73,20 +79,36 @@ def run(args: argparse.Namespace) -> None:
             df = df.loc[:, keep_cols]
 
         cands_text = [normalize_text_value(t) for t in df["profile_text"].astype(str).tolist()]
-        features = batch_features(query_norm, cands_text)
-        df["strength_sim"] = [feat["strength_sim"] for feat in features]
-        df["jaccard_text"] = [feat["jaccard_text"] for feat in features]
-        # Per-query min-max normalization for simple features
-        s_norm = minmax_normalize(df["strength_sim"].astype(float))
-        j_norm = minmax_normalize(df["jaccard_text"].astype(float))
-        df["simple_score"] = 0.6 * s_norm + 0.4 * j_norm
+        features = batch_features(
+            query_norm,
+            cands_text,
+            w_strength=float(args.post_strength_weight),
+            w_jaccard=float(args.post_jaccard_weight),
+            w_brand_penalty=float(args.post_brand_penalty),
+            minmax_within_query=False,
+        )
+        df["strength_sim"] = features["strength_sim"]
+        df["jaccard_text"] = features["jaccard_text"]
+        df["brand_score"] = features["brand_score"]
+        # Optional per-query min-max normalization for simple features
+        if args.post_minmax:
+            s_norm = minmax_normalize(df["strength_sim"].astype(float))
+            j_norm = minmax_normalize(df["jaccard_text"].astype(float))
+        else:
+            s_norm = df["strength_sim"].astype(float)
+            j_norm = df["jaccard_text"].astype(float)
+        denom = max(float(args.post_strength_weight) + float(args.post_jaccard_weight), 1e-9)
+        blended = (float(args.post_strength_weight) * s_norm + float(args.post_jaccard_weight) * j_norm) / denom
+        df["simple_score"] = blended + float(args.post_brand_penalty) * df["brand_score"].astype(float)
         relevance = df.get("_relevance_score", pd.Series([0.0] * len(df)))
-        df["final_score"] = 0.7 * relevance.fillna(0.0) + 0.3 * df["simple_score"]
-        df = df.sort_values(
-            ["final_score", "strength_sim", "jaccard_text"], ascending=[False, False, False]
-        ).reset_index(drop=True)
+        df["final_score"] = (1.0 - float(args.post_weight)) * relevance.fillna(0.0) + float(args.post_weight) * df["simple_score"]
+        sort_order = ["brand_score", "final_score", "strength_sim", "jaccard_text"]
+        ascending = [False, False, False, False]
+        available_sort = [col for col in sort_order if col in df.columns]
+        asc = [ascending[sort_order.index(col)] for col in available_sort]
+        df = df.sort_values(available_sort, ascending=asc).reset_index(drop=True)
 
-        print("concept_id   | score  | s_sim | name")
+        print("concept_id   | final  | s_sim | jacc | brand | name")
         print("-" * 80)
         for _, row in df.head(args.show_topk).iterrows():
             print(_format_row(row))
@@ -96,10 +118,25 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Interactive terminology lookup")
     parser.add_argument("--db", required=True, help="Path to LanceDB directory")
     parser.add_argument("--table", required=True, help="LanceDB table name")
-    parser.add_argument("--candidate-topk", type=int, default=100, help="Candidate pool size")
-    parser.add_argument("--show-topk", type=int, default=10, help="Number of rows to display")
+    parser.add_argument("--candidate-topk", type=int, default=200, help="Candidate pool size")
+    parser.add_argument("--show-topk", type=int, default=20, help="Number of rows to display")
     parser.add_argument("--device", default="auto", help="Device: auto|cuda|mps|cpu (default: auto)")
     parser.add_argument("--batch-size", type=int, default=64, help="Embedding batch size")
+    parser.add_argument("--post-weight", type=float, default=0.3, help="Weight for simple post-score in final blend (0.0 = ML only)")
+    parser.add_argument("--post-strength-weight", type=float, default=0.6, help="Weight for strength feature within simple score")
+    parser.add_argument("--post-jaccard-weight", type=float, default=0.4, help="Weight for jaccard feature within simple score")
+    parser.add_argument(
+        "--post-brand-penalty",
+        type=float,
+        default=0.3,
+        help="Penalty weight applied when candidate brand conflicts with query text",
+    )
+    parser.add_argument(
+        "--post-minmax",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable per-query min-max normalization of simple features (default: enabled)",
+    )
     return parser.parse_args(argv)
 
 

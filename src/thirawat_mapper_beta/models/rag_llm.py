@@ -3,13 +3,71 @@
 from __future__ import annotations
 
 import json
-import os
 import logging
+import os
 from dataclasses import dataclass
-from typing import Dict, Optional, Protocol, Sequence
+from typing import Any, Dict, List, Optional, Protocol, Sequence
 from urllib import error, request
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _build_plain_messages(system_prompt: str, user_prompt: str) -> List[Dict[str, str]]:
+    """Return chat messages compatible with the Workers AI run endpoint."""
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def _build_responses_messages(system_prompt: str, user_prompt: str) -> List[Dict[str, str]]:
+    """Return chat messages shaped for the Responses API."""
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def _extract_text_from_cf_payload(payload: Any) -> Optional[str]:
+    """Best-effort extraction of assistant text from Workers AI payloads."""
+
+    stack: List[Any] = [payload]
+    visited: set[int] = set()
+    priority_keys = ("response", "output_text", "text", "delta", "content", "value")
+    nested_keys = ("messages", "output", "result", "choices")
+
+    while stack:
+        current = stack.pop()
+        if current is None:
+            continue
+        if isinstance(current, str):
+            stripped = current.strip()
+            if stripped:
+                return stripped
+            continue
+        current_id = id(current)
+        if isinstance(current, (list, dict)) and current_id in visited:
+            continue
+        if isinstance(current, (list, dict)):
+            visited.add(current_id)
+        if isinstance(current, list):
+            stack.extend(reversed(current))
+            continue
+        if isinstance(current, dict):
+            for key in priority_keys:
+                if key in current:
+                    stack.append(current[key])
+            for key in nested_keys:
+                if key in current:
+                    stack.append(current[key])
+            for key, value in current.items():
+                if key in priority_keys or key in nested_keys:
+                    continue
+                stack.append(value)
+            continue
+    return None
 
 
 class BaseLLMClient(Protocol):
@@ -46,13 +104,13 @@ class CloudflareConfig:
     def resolve_account_id(self) -> str:
         account_id = self.account_id or os.getenv("CLOUDFLARE_ACCOUNT_ID")
         if not account_id:
-            raise ValueError("Cloudflare account ID is required (set CLOUDFLARE_ACCOUNT_ID or pass --cloudflare-account-id).")
+            raise ValueError("Cloudflare account ID is required; set CLOUDFLARE_ACCOUNT_ID in your environment.")
         return account_id
 
     def resolve_api_token(self) -> str:
         token = self.api_token or os.getenv("CLOUDFLARE_API_TOKEN")
         if not token:
-            raise ValueError("Cloudflare API token is required (set CLOUDFLARE_API_TOKEN or pass --cloudflare-api-token).")
+            raise ValueError("Cloudflare API token is required; set CLOUDFLARE_API_TOKEN in your environment.")
         return token
 
     def endpoint(self) -> str:
@@ -82,21 +140,16 @@ class CloudflareLLMClient(BaseLLMClient):
         if not prompt:
             raise ValueError("Prompt must be non-empty.")
         endpoint = self.cfg.endpoint()
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You help rank medical terminology candidates. "
-                    "Reply with a comma-separated list or JSON array; do not add commentary."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ]
+        system_prompt = (
+            "You help rank medical terminology candidates. "
+            "Reply with a comma-separated list or JSON array; do not add commentary."
+        )
+        plain_messages = _build_plain_messages(system_prompt, prompt)
         payload: Dict[str, object]
         if endpoint.endswith("/responses"):
             payload = {
                 "model": self.cfg.model_name,
-                "input": messages,
+                "input": _build_responses_messages(system_prompt, prompt),
             }
             effort = self.cfg.reasoning_effort
             summary = self.cfg.reasoning_summary
@@ -108,7 +161,7 @@ class CloudflareLLMClient(BaseLLMClient):
                     reasoning["summary"] = summary
                 payload["reasoning"] = reasoning
         else:
-            payload = {"input": messages}
+            payload = {"messages": plain_messages}
         data = json.dumps(payload).encode("utf-8")
         headers = {
             "Authorization": f"Bearer {self.cfg.resolve_api_token()}",
@@ -128,7 +181,7 @@ class CloudflareLLMClient(BaseLLMClient):
 
         raw = raw_bytes.decode("utf-8")
         if content_type.startswith("text/event-stream"):
-            chunks = []
+            chunks: List[str] = []
             for line in raw.splitlines():
                 if not line.startswith("data:"):
                     continue
@@ -139,33 +192,16 @@ class CloudflareLLMClient(BaseLLMClient):
                     event = json.loads(payload_str)
                 except json.JSONDecodeError:
                     continue
-                message = event.get("response") or event.get("text") or event.get("output_text")
-                if message:
-                    chunks.append(str(message))
+                chunk = _extract_text_from_cf_payload(event)
+                if chunk:
+                    chunks.append(chunk)
             text = "".join(chunks).strip()
         else:
             try:
                 response = json.loads(raw) if raw else {}
             except json.JSONDecodeError as exc:
                 raise RuntimeError(f"Cloudflare API returned invalid JSON: {raw}") from exc
-            result = response.get("result") if isinstance(response, dict) else None
-            text: Optional[str] = None
-            if isinstance(result, dict):
-                text = (
-                    result.get("response")
-                    or result.get("output_text")
-                    or result.get("text")
-                    or result.get("content")
-                )
-                if text is None and isinstance(result.get("messages"), list):
-                    for message in reversed(result["messages"]):
-                        if isinstance(message, dict) and message.get("role") == "assistant":
-                            content = message.get("content")
-                            if isinstance(content, str):
-                                text = content
-                                break
-            if text is None and isinstance(response, dict):
-                text = response.get("response") or response.get("output_text") or response.get("text")
+            text = _extract_text_from_cf_payload(response)
             if text is None:
                 raise RuntimeError(f"Cloudflare API response missing text payload: {raw}")
         output = text.strip()
@@ -341,6 +377,8 @@ class LlamaCppServerConfig:
     base_url: str = "http://127.0.0.1:8080"
     timeout: int = 120
     model_name: Optional[str] = None
+    cache_prompt: bool = True
+    slot_id: Optional[int] = None
 
     def endpoint(self) -> str:
         return self.base_url.rstrip("/") + "/completion"
@@ -370,6 +408,10 @@ class LlamaCppServerLLMClient(BaseLLMClient):
         }
         if self.cfg.model_name:
             payload["model"] = self.cfg.model_name
+        if self.cfg.cache_prompt:
+            payload["cache_prompt"] = True
+        if self.cfg.slot_id is not None:
+            payload["id_slot"] = int(self.cfg.slot_id)
         if max_new_tokens is not None:
             payload["n_predict"] = max_new_tokens
         if temperature is not None:

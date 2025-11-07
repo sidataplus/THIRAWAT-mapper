@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set
 
@@ -148,15 +149,26 @@ def _build_rag_pipeline(
     provider = provider.strip()
     default_model = args.rag_model or "openai/gpt-oss-20b"
     if provider == "cloudflare":
+        account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID")
+        api_token = os.getenv("CLOUDFLARE_API_TOKEN")
+        if not account_id or not api_token:
+            raise ValueError(
+                "cloudflare provider requires CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN environment variables."
+            )
         model_name = default_model
         if not model_name.startswith("@cf/"):
             model_name = f"@cf/{model_name}"
+        use_responses_api = args.cloudflare_use_responses_api
+        lowered = model_name.lower()
+        if lowered.startswith("@cf/meta/") and use_responses_api:
+            print("[info] Forcing Cloudflare run endpoint for meta models (disabling Responses API).")
+            use_responses_api = False
         cfg = CloudflareConfig(
-            account_id=args.cloudflare_account_id,
-            api_token=args.cloudflare_api_token,
+            account_id=account_id,
+            api_token=api_token,
             model_name=model_name,
             base_url=args.cloudflare_base_url,
-            use_responses_api=args.cloudflare_use_responses_api,
+            use_responses_api=use_responses_api,
             reasoning_effort=args.gpt_reasoning_effort,
             reasoning_summary=args.cf_reasoning_summary,
         )
@@ -397,9 +409,17 @@ def run(args: argparse.Namespace) -> None:
 
         if not df_candidates.empty:
             cands_text = [normalize_text_value(t) for t in df_candidates["profile_text"].astype(str).tolist()]
-            features = batch_features(query_text_norm, cands_text)
-            df_candidates["strength_sim"] = [feat["strength_sim"] for feat in features]
-            df_candidates["jaccard_text"] = [feat["jaccard_text"] for feat in features]
+            features = batch_features(
+                query_text_norm,
+                cands_text,
+                w_strength=float(args.post_strength_weight),
+                w_jaccard=float(args.post_jaccard_weight),
+                w_brand_penalty=float(args.post_brand_penalty),
+                minmax_within_query=False,
+            )
+            df_candidates["strength_sim"] = features["strength_sim"]
+            df_candidates["jaccard_text"] = features["jaccard_text"]
+            df_candidates["_brand_score"] = features["brand_score"]
             # Optional per-query min-max normalization for simple features
             if args.post_minmax:
                 s_feat = minmax_normalize(df_candidates["strength_sim"].astype(float))
@@ -407,7 +427,9 @@ def run(args: argparse.Namespace) -> None:
             else:
                 s_feat = df_candidates["strength_sim"].astype(float)
                 j_feat = df_candidates["jaccard_text"].astype(float)
-            df_candidates["simple_score"] = float(args.post_strength_weight) * s_feat + float(args.post_jaccard_weight) * j_feat
+            denom = max(float(args.post_strength_weight) + float(args.post_jaccard_weight), 1e-9)
+            blended = (float(args.post_strength_weight) * s_feat + float(args.post_jaccard_weight) * j_feat) / denom
+            df_candidates["simple_score"] = blended + float(args.post_brand_penalty) * df_candidates["_brand_score"].astype(float)
             relevance = df_candidates.get("_relevance_score", pd.Series([0.0] * len(df_candidates)))
             w = float(args.post_weight)
             df_candidates["final_score"] = (1.0 - w) * relevance.fillna(0.0) + w * df_candidates["simple_score"]
@@ -564,6 +586,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--post-weight", type=float, default=0.3, help="Weight for simple post-score in final blend (0.0 = ML only)")
     parser.add_argument("--post-strength-weight", type=float, default=0.6, help="Weight for strength feature within simple score")
     parser.add_argument("--post-jaccard-weight", type=float, default=0.4, help="Weight for jaccard feature within simple score")
+    parser.add_argument(
+        "--post-brand-penalty",
+        type=float,
+        default=0.3,
+        help="Penalty weight applied when candidate brand conflicts with query text",
+    )
     parser.add_argument("--post-minmax", action=argparse.BooleanOptionalAction, default=True, help="Enable per-query min-max normalization of simple features (default: enabled)")
     parser.add_argument("--source-name-column", default="sourceName", help="Column containing source names")
     parser.add_argument("--source-code-column", default="sourceCode", help="Column containing source codes")
@@ -652,8 +680,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
 
     cf_group = parser.add_argument_group("Cloudflare provider")
-    cf_group.add_argument("--cloudflare-account-id", default=None, help="Cloudflare account ID for Workers AI.")
-    cf_group.add_argument("--cloudflare-api-token", default=None, help="Cloudflare API token for Workers AI.")
     cf_group.add_argument(
         "--cloudflare-base-url",
         default="https://api.cloudflare.com/client/v4",
