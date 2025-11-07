@@ -37,6 +37,7 @@ def _fixed_size_list(vectors: np.ndarray) -> pa.FixedSizeListArray:
 def build_index(args: argparse.Namespace) -> None:
     domain_ids = _normalize_multi_value(args.domain_id)
     concept_class_ids = _normalize_multi_value(args.concept_class_id)
+    exclude_concept_class_ids = _normalize_multi_value(args.exclude_concept_class_id)
     extra_columns = _normalize_multi_value(args.extra_column)
 
     df = read_concept_profiles(
@@ -45,6 +46,7 @@ def build_index(args: argparse.Namespace) -> None:
         concepts_table=args.concepts_table,
         domain_ids=domain_ids,
         concept_class_ids=concept_class_ids,
+        exclude_concept_class_ids=exclude_concept_class_ids,
         extra_profile_columns=extra_columns,
     )
 
@@ -83,6 +85,7 @@ def build_index(args: argparse.Namespace) -> None:
         "concepts_table": args.concepts_table,
         "domain_id": list(domain_ids),
         "concept_class_id": list(concept_class_ids),
+        "exclude_concept_class_id": list(exclude_concept_class_ids),
         "extra_columns": list(extra_columns),
         "vector_dim": vectors.shape[1],
         "count": len(df),
@@ -111,6 +114,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="append",
         default=[],
         help="Concept class ID filter (comma-separated or repeat flag for multiples)",
+    )
+    parser.add_argument(
+        "--exclude-concept-class-id",
+        action="append",
+        default=[],
+        help="Concept class ID exclusion list (comma-separated or repeat flag)",
     )
     parser.add_argument(
         "--extra-column",

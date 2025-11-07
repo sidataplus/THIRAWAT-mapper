@@ -39,6 +39,7 @@ uv run python -m thirawat_mapper_beta.index.build \
   --concepts-table concept \
   --domain-id Drug \
   --concept-class-id "Clinical Drug,Quant Clinical Drug,Clinical Drug Comp,Clinical Drug Form,Ingredient" \
+  --exclude-concept-class-id "Clinical Drug Box,Branded Drug Box,Branded Pack Box,Clinical Pack Box,Marketed Product,Quant Branded Box,Quant Clinical Box" \
   --extra-column "concept_name,domain_id,vocabulary_id,concept_class_id" \
   --out-db data/lancedb/db \
   --table concepts_drug \
@@ -51,7 +52,8 @@ Key options:
 - `--duckdb` – DuckDB file produced by [`sidataplus/athena2duckdb`](https://github.com/sidataplus/athena2duckdb).
 - `--profiles-table` – Table containing `concept_id` and `profile_text` columns.
 - `--concepts-table` – OMOP concept table (defaults to `concept`). The builder always joins to this table and keeps only standard, valid concepts (`standard_concept = 'S' AND invalid_reason IS NULL`).
-- `--domain-id`, `--concept-class-id` – Optional filters; accept comma‑separated lists or repeated flags.
+- `--domain-id`, `--concept-class-id` – Optional filters; accept comma-separated lists or repeated flags.
+- `--exclude-concept-class-id` – Exclude specific classes (comma-separated or repeat flag). Default empty; recommended exclusions: Clinical Drug Box, Branded Drug Box, Branded Pack Box, Clinical Pack Box, Marketed Product, Quant Branded Box, Quant Clinical Box.
 - `--extra-column` – Carry additional columns from the profiles table into LanceDB (repeat flag).
 - `--out-db` / `--table` – Target LanceDB directory and table name.
 
@@ -107,6 +109,107 @@ Selected flags:
 - `--where` – Optional LanceDB filter, e.g., `vocabulary_id = 'RxNorm' AND concept_class_id != 'Ingredient'` (when those columns exist in the index).
 - `--device` – `auto|cuda|mps|cpu` (default `auto` with safe fallback and fast matmul).
 - `--post-weight` – Weight for simple post‑score blend (default `0.3`).
+
+### 2.1 LLM-assisted RAG reranking
+
+Bulk inference can optionally send the top reranked candidates to an LLM for tie-breaking or abstention logic. Enable this flow with `--rag-provider` and supply provider-specific flags. The CLI saves every prompt/response pair to `rag_prompts.md` under the chosen `--out` directory so you can audit exactly what was sent.
+
+General RAG knobs:
+
+```
+--rag-provider {cloudflare,ollama,llamacpp}
+--rag-model MODEL_ID                # default openai/gpt-oss-20b
+--rag-candidate-limit 50            # number of reranked candidates passed to the LLM
+--rag-profile-char-limit 512        # truncate long profile_text snippets
+--rag-include-retrieval-score/--no-rag-include-retrieval-score
+--rag-include-final-score/--no-rag-include-final-score
+--rag-extra-context-column COLUMN   # optional extra context column from the input sheet
+--rag-stop-sequence TEXT (repeatable)
+--rag-use-normalized-query/--no-rag-use-normalized-query
+```
+
+> **Tip:** RAG is isolated to `infer.bulk`. The interactive REPL intentionally remains retrieval-only in this beta.
+
+#### Cloudflare Workers AI (remote)
+
+```
+uv run python -m thirawat_mapper_beta.infer.bulk \
+  --db data/lancedb/drug_major \
+  --table drug_major \
+  --input data/input/A10.csv \
+  --out runs/a10_cf_rag \
+  --n-limit 100 \
+  --rag-provider cloudflare \
+  --cloudflare-account-id <ACCOUNT_ID> \
+  --cloudflare-api-token <API_TOKEN> \
+  --rag-model openai/gpt-oss-20b
+```
+
+Cloudflare-specific flags:
+
+```
+--cloudflare-account-id ACCOUNT
+--cloudflare-api-token TOKEN
+--cloudflare-base-url https://api.cloudflare.com/client/v4
+--cloudflare-use-responses-api / --no-cloudflare-use-responses-api
+--gpt-reasoning-effort {low,medium,high}
+--cf-reasoning-summary {auto,concise,detailed}
+```
+
+Environment variables `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` are honored if the flags are omitted.
+
+#### Ollama (local GGUF/chat server)
+
+```
+uv run python -m thirawat_mapper_beta.infer.bulk \
+  --db data/lancedb/drug_major \
+  --table drug_major \
+  --input data/input/A10.csv \
+  --out runs/a10_ollama_rag \
+  --n-limit 100 \
+  --rag-provider ollama \
+  --ollama-base-url http://localhost:11434 \
+  --ollama-model gpt-oss:20b
+```
+
+Ollama-specific flags:
+
+```
+--ollama-base-url URL          # default http://localhost:11434
+--ollama-model MODEL_TAG       # defaults to --rag-model value
+--ollama-timeout 120           # seconds
+--ollama-keep-alive 5m         # optional keep-alive hint sent to server
+```
+
+#### llama.cpp server (local HTTP API)
+
+`--rag-provider llamacpp` expects the [llama.cpp `llama-server`](https://github.com/ggerganov/llama.cpp/tree/master/examples/server) process to be running ahead of time (default `http://127.0.0.1:8080`). Launch the server separately with your desired context and batching flags (for example: `llama-server -hf ggml-org/gpt-oss-20b-GGUF --ctx-size 0 --jinja -ub 2048 -b 2048 -fa on`). Point the CLI at that HTTP endpoint, not at GGUF files directly:
+
+```
+uv run python -m thirawat_mapper_beta.infer.bulk \
+  --db data/lancedb/drug_major \
+  --table drug_major \
+  --input data/input/A10.csv \
+  --out runs/a10_llamacpp_rag \
+  --rag-provider llamacpp \
+  --llamacpp-base-url http://127.0.0.1:8080 \
+  --rag-model ggml-org/gpt-oss-20b-GGUF
+```
+
+llama.cpp flags:
+
+```
+--llamacpp-base-url URL          # default http://127.0.0.1:8080
+--llamacpp-timeout 120           # HTTP timeout in seconds
+--llamacpp-chat-format FORMAT    # e.g., qwen, llama
+--llamacpp-system-prompt TEXT    # optional instruction prefix
+--llamacpp-n-ctx 8192            # forwarded via query parameters when supported
+--llamacpp-model-path /path/model.gguf   # fallback to llama-cpp-python bindings when no base URL is set
+```
+
+If you omit `--llamacpp-base-url`, the CLI falls back to the python bindings and expects `--llamacpp-model-path` to point to a local GGUF file (plus any `--llamacpp-n-*` overrides). In that mode, the `rag-model` flag is ignored and the file name controls which model loads.
+
+For all providers, the CLI logs each prompt/response pair and the parsed candidate ordering to `rag_prompts.md` in the `--out` directory for downstream review.
 
 
 ## 3. Interactive Query (REPL)

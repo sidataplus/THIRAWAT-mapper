@@ -10,54 +10,7 @@ import pandas as pd
 from thirawat_mapper_beta.models import SapBERTEmbedder, ThirawatReranker
 from thirawat_mapper_beta.scoring import batch_features
 from thirawat_mapper_beta.utils import connect_table, normalize_text_value
-
-
-def _resolve_device(name: str | None) -> str:
-    """Return best-available device: cuda → mps → cpu, with runtime sanity checks."""
-    try:
-        import torch
-        wanted = (name or "auto").lower()
-        has_cuda = torch.cuda.is_available()
-        has_mps = bool(getattr(torch.backends, "mps", None)) and torch.backends.mps.is_available()
-
-        def _ok(dev: str) -> bool:
-            try:
-                torch.tensor([0], device=dev)
-                return True
-            except Exception:
-                return False
-
-        if wanted in ("", "auto", "none"):
-            if has_cuda and _ok("cuda"):
-                return "cuda"
-            if has_mps and _ok("mps"):
-                return "mps"
-            return "cpu"
-        if wanted == "cuda":
-            if has_cuda and _ok("cuda"):
-                return "cuda"
-            return "mps" if has_mps and _ok("mps") else "cpu"
-        if wanted == "mps":
-            if has_mps and _ok("mps"):
-                return "mps"
-            return "cuda" if has_cuda and _ok("cuda") else "cpu"
-        return "cpu"
-    except Exception:
-        return "cpu"
-
-
-def _configure_torch_for_infer(device: str) -> None:
-    """Set fast matmul/TF32 knobs when safe to improve GPU utilization."""
-    try:
-        import torch
-        torch.set_float32_matmul_precision("high")
-        if device == "cuda":
-            try:
-                torch.backends.cuda.matmul.allow_tf32 = True  # type: ignore[attr-defined]
-            except Exception:
-                pass
-    except Exception:
-        pass
+from .utils import configure_torch_for_infer, minmax_normalize, resolve_device
 
 
 def _format_row(row: pd.Series) -> str:
@@ -70,8 +23,8 @@ def _format_row(row: pd.Series) -> str:
 
 def run(args: argparse.Namespace) -> None:
     table, vector_column = connect_table(args.db, args.table)
-    device = _resolve_device(args.device)
-    _configure_torch_for_infer(device)
+    device = resolve_device(args.device)
+    configure_torch_for_infer(device)
     embedder = SapBERTEmbedder(device=device, batch_size=args.batch_size)
     reranker = ThirawatReranker(device=device, return_score="all")
 
@@ -124,16 +77,8 @@ def run(args: argparse.Namespace) -> None:
         df["strength_sim"] = [feat["strength_sim"] for feat in features]
         df["jaccard_text"] = [feat["jaccard_text"] for feat in features]
         # Per-query min-max normalization for simple features
-        def _minmax(col: pd.Series) -> pd.Series:
-            vmin = float(col.min())
-            vmax = float(col.max())
-            rng = vmax - vmin
-            if rng <= 1e-9:
-                return pd.Series([0.0] * len(col), index=col.index)
-            return (col - vmin) / rng
-
-        s_norm = _minmax(df["strength_sim"].astype(float))
-        j_norm = _minmax(df["jaccard_text"].astype(float))
+        s_norm = minmax_normalize(df["strength_sim"].astype(float))
+        j_norm = minmax_normalize(df["jaccard_text"].astype(float))
         df["simple_score"] = 0.6 * s_norm + 0.4 * j_norm
         relevance = df.get("_relevance_score", pd.Series([0.0] * len(df)))
         df["final_score"] = 0.7 * relevance.fillna(0.0) + 0.3 * df["simple_score"]

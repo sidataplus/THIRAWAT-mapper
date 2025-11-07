@@ -25,6 +25,7 @@ def read_concept_profiles(
     concepts_table: Optional[str] = None,
     domain_ids: Optional[Iterable[str]] = None,
     concept_class_ids: Optional[Iterable[str]] = None,
+    exclude_concept_class_ids: Optional[Iterable[str]] = None,
     extra_profile_columns: Sequence[str] = (),
 ) -> pd.DataFrame:
     """Return concept profiles joined to the OMOP concept table.
@@ -37,9 +38,9 @@ def read_concept_profiles(
         Table containing ``concept_id`` and ``profile_text`` columns.
     concepts_table:
         OMOP ``concept`` table name. When omitted, defaults to ``concept``.
-    domain_ids / concept_class_ids:
-        Iterable of allowed values. When provided, ``concepts_table`` must be
-        set. Values are compared case-sensitively.
+    domain_ids / concept_class_ids / exclude_concept_class_ids:
+        Iterable of allowed or disallowed values. When provided, ``concepts_table``
+        must be set. Values are compared case-sensitively.
     extra_profile_columns:
         Additional columns to select from ``profiles_table`` if present.
 
@@ -51,6 +52,7 @@ def read_concept_profiles(
 
     domain_ids_list = _as_list(domain_ids)
     class_ids_list = _as_list(concept_class_ids)
+    exclude_class_ids_list = _as_list(exclude_concept_class_ids)
 
     duckdb_path = Path(duckdb_path)
     if not duckdb_path.exists():
@@ -77,6 +79,9 @@ def read_concept_profiles(
     if class_ids_list:
         values = ",".join(f"'{v}'" for v in class_ids_list)
         filters.append(f"c.concept_class_id IN ({values})")
+    if exclude_class_ids_list:
+        values = ",".join(f"'{v}'" for v in exclude_class_ids_list)
+        filters.append(f"c.concept_class_id NOT IN ({values})")
 
     if filters:
         query.append(" WHERE ")
