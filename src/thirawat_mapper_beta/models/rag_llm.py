@@ -35,7 +35,7 @@ def _extract_text_from_cf_payload(payload: Any) -> Optional[str]:
 
     stack: List[Any] = [payload]
     visited: set[int] = set()
-    priority_keys = ("response", "output_text", "text", "delta", "content", "value")
+    priority_keys = ("response", "text", "output_text", "delta", "content", "value")
     nested_keys = ("messages", "output", "result", "choices")
 
     while stack:
@@ -63,7 +63,7 @@ def _extract_text_from_cf_payload(payload: Any) -> Optional[str]:
                 if key in current:
                     stack.append(current[key])
             for key, value in current.items():
-                if key in priority_keys or key in nested_keys:
+                if key in priority_keys or key in nested_keys or key == "type":
                     continue
                 stack.append(value)
             continue
@@ -213,6 +213,96 @@ class CloudflareLLMClient(BaseLLMClient):
         return output
 
 
+# --- OpenRouter (OpenAI-compatible REST API) --------------------------------
+
+
+@dataclass
+class OpenRouterConfig:
+    api_key: Optional[str] = None
+    model_name: str = "openrouter/polaris-alpha"
+    base_url: str = "https://openrouter.ai/api/v1"
+
+    def resolve_api_key(self) -> str:
+        token = self.api_key or os.getenv("OPENROUTER_API_KEY")
+        if not token:
+            raise ValueError("OpenRouter API key is required; set OPENROUTER_API_KEY in your environment.")
+        return token
+
+    def endpoint(self) -> str:
+        return self.base_url.rstrip("/") + "/chat/completions"
+
+
+class OpenRouterLLMClient(BaseLLMClient):
+    """Client for the OpenRouter API (OpenAI-compatible chat completions)."""
+
+    def __init__(self, cfg: OpenRouterConfig) -> None:
+        self.cfg = cfg
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        max_new_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        stop: Optional[Sequence[str]] = None,
+    ) -> str:
+        if not prompt:
+            raise ValueError("Prompt must be non-empty.")
+        system_prompt = (
+            "You help rank medical terminology candidates. "
+            "Reply with a comma-separated list or JSON array; do not add commentary."
+        )
+        payload: Dict[str, object] = {
+            "model": self.cfg.model_name,
+            "messages": _build_plain_messages(system_prompt, prompt),
+        }
+        if max_new_tokens is not None:
+            payload["max_tokens"] = int(max_new_tokens)
+        if stop:
+            payload["stop"] = list(stop)
+        data = json.dumps(payload).encode("utf-8")
+        headers = {
+            "Authorization": f"Bearer {self.cfg.resolve_api_key()}",
+            "Content-Type": "application/json",
+        }
+        req = request.Request(self.cfg.endpoint(), data=data, headers=headers, method="POST")
+        try:
+            with request.urlopen(req) as resp:
+                raw_bytes = resp.read()
+        except error.HTTPError as exc:  # pragma: no cover - network
+            detail = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else ""
+            message = detail or exc.reason
+            raise RuntimeError(f"OpenRouter API error {exc.code}: {message}") from exc
+        except error.URLError as exc:  # pragma: no cover - network
+            raise RuntimeError(f"Failed to reach OpenRouter API: {exc.reason}") from exc
+
+        raw = raw_bytes.decode("utf-8") if raw_bytes else ""
+        try:
+            response = json.loads(raw) if raw else {}
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"OpenRouter API returned invalid JSON: {raw}") from exc
+        choices = response.get("choices") if isinstance(response, dict) else None
+        if not choices:
+            raise RuntimeError(f"OpenRouter response missing choices: {raw}")
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        if not isinstance(message, dict):
+            raise RuntimeError(f"OpenRouter response missing message: {raw}")
+        content = message.get("content")
+        if isinstance(content, list):
+            # Some models can emit structured content blocks; join text entries.
+            text_parts = [str(item.get("text", "")) for item in content if isinstance(item, dict)]
+            output = "".join(text_parts).strip()
+        else:
+            output = str(content or "").strip()
+        if stop and output:
+            for token in stop:
+                if token and token in output:
+                    output = output.split(token, 1)[0].rstrip()
+                    break
+        return output
+
+
 # --- Ollama (local REST API) -----------------------------------------------
 
 
@@ -297,8 +387,8 @@ class LlamaCppConfig:
     chat_format: Optional[str] = None
     system_prompt: Optional[str] = None
     max_tokens: int = 512
-    temperature: float = 0.0
-    top_p: float = 0.95
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
 
 
 class LlamaCppLLMClient(BaseLLMClient):
@@ -333,21 +423,25 @@ class LlamaCppLLMClient(BaseLLMClient):
         if not prompt:
             raise ValueError("Prompt must be non-empty.")
         max_tokens = int(max_new_tokens or self.cfg.max_tokens)
-        temp = float(self.cfg.temperature if temperature is None else temperature)
-        nucleus = float(self.cfg.top_p if top_p is None else top_p)
+        temp = temperature if temperature is not None else self.cfg.temperature
+        nucleus = top_p if top_p is not None else self.cfg.top_p
 
         if self.cfg.chat_format:
             messages = []
             if self.cfg.system_prompt:
                 messages.append({"role": "system", "content": self.cfg.system_prompt})
             messages.append({"role": "user", "content": prompt})
-            result = self._llama.create_chat_completion(
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=max(temp, 0.0),
-                top_p=nucleus,
-                stop=list(stop) if stop else None,
-            )
+            chat_kwargs: Dict[str, object] = {
+                "messages": messages,
+                "max_tokens": max_tokens,
+            }
+            if stop:
+                chat_kwargs["stop"] = list(stop)
+            if temp is not None:
+                chat_kwargs["temperature"] = max(0.0, float(temp))
+            if nucleus is not None:
+                chat_kwargs["top_p"] = float(nucleus)
+            result = self._llama.create_chat_completion(**chat_kwargs)
             choices = result.get("choices", [])
             if not choices:
                 return ""
@@ -358,13 +452,17 @@ class LlamaCppLLMClient(BaseLLMClient):
         final_prompt = prompt
         if self.cfg.system_prompt:
             final_prompt = f"{self.cfg.system_prompt.strip()}\n\n{prompt}"
-        result = self._llama.create_completion(
-            prompt=final_prompt,
-            max_tokens=max_tokens,
-            temperature=max(temp, 0.0),
-            top_p=nucleus,
-            stop=list(stop) if stop else None,
-        )
+        completion_kwargs: Dict[str, object] = {
+            "prompt": final_prompt,
+            "max_tokens": max_tokens,
+        }
+        if stop:
+            completion_kwargs["stop"] = list(stop)
+        if temp is not None:
+            completion_kwargs["temperature"] = max(0.0, float(temp))
+        if nucleus is not None:
+            completion_kwargs["top_p"] = float(nucleus)
+        result = self._llama.create_completion(**completion_kwargs)
         choices = result.get("choices", [])
         if not choices:
             return ""

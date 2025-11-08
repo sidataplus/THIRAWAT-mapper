@@ -21,7 +21,6 @@ DEFAULT = """You are ranking candidate RxNorm drug concepts for a given query. E
 ## Output:
 - Return a comma-separated list of candidate strings, ordered best → worst.
 - Copy each candidate exactly as shown (including casing and the trailing `(concept_id)`).
-- If none qualify, return an empty string.
 
 ## Normalization for matching (do not alter output strings):
 - Case-insensitive; trim/normalize whitespace; ignore minor punctuation.
@@ -39,7 +38,6 @@ DEFAULT = """You are ranking candidate RxNorm drug concepts for a given query. E
 ## HARD RULES (apply before any ranking):
 A) **Brand-mismatch exclusion.** If the query explicitly names a brand (e.g., `[Gensulin N]`), then **exclude** every Candidate that names a **different** brand (e.g., `[Humulin N]`, inline “Humulin N”). Do not rank or return them.  
    - If no same-brand Candidates exist, consider only **unbranded/brand-neutral** Candidates.  
-   - If neither same-brand nor unbranded Candidates achieve ≥2/3 match (see Rules below), **return an empty string.**  
    - Brand names are never interchangeable unless literally identical after case/punctuation normalization.
 
 B) **Combination products.** All actives named in the query must be present; exclude any Candidate with extra unmentioned actives.
@@ -119,7 +117,7 @@ Answer (illustrative):
 ## Guidance:
 - Do not simply echo the candidate order. Reorder candidates whenever the rules demand it (for example, placing unbranded matches ahead of mismatched brands even if the unbranded candidate appears later in the list).
 - Ignore the numeric bullet (`1.`, `2.` …) when copying; return only the candidate text with its `(concept_id)`.
-- If you are confident that none of the candidates are correct, return an empty string.
+- If none of the candidates satisfy the rules, reorder top 10 candidates as best as you can.
 - Respond with a comma-separated list of the candidate texts exactly as written.
 
 

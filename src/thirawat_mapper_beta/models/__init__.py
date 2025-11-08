@@ -11,6 +11,8 @@ from .rag_llm import (
     LlamaCppServerLLMClient,
     OllamaConfig,
     OllamaLLMClient,
+    OpenRouterConfig,
+    OpenRouterLLMClient,
 )
 from .rag_pipeline import RAGPipeline, RagRanking
 from .rag_prompt import RAGPromptBuilder, RagCandidate, TemplatePromptBuilder, to_candidates
@@ -26,6 +28,8 @@ __all__ = [
     "LlamaCppServerLLMClient",
     "OllamaConfig",
     "OllamaLLMClient",
+    "OpenRouterConfig",
+    "OpenRouterLLMClient",
     "RAGPipeline",
     "RagCandidate",
     "RAGPromptBuilder",
