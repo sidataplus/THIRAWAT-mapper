@@ -15,7 +15,7 @@ RATIO = re.compile(
         actuation|actuations|actuat|puff|puffs|spray|sprays|drop|drops|
         g|gram|grams|dose|doses|unit|units|unt|
         hr|hour|hours|h|day|days
-    )
+    )(?![A-Za-z])
     """,
     re.IGNORECASE | re.VERBOSE,
 )
@@ -27,7 +27,7 @@ PER = re.compile(
         actuation|actuations|actuat|puff|puffs|spray|sprays|drop|drops|
         g|gram|grams|dose|doses|unit|units|unt|
         hr|hour|hours|h|day|days
-    )
+    )(?![A-Za-z])
     """,
     re.IGNORECASE | re.VERBOSE,
 )
@@ -44,6 +44,12 @@ SINGLE = re.compile(r"(?P<a>\d+(?:\.\d+)?)\s*(?P<u>mg|mcg|g|iu|meq|unit|units|un
 PERCENT = re.compile(r"(?P<a>\d+(?:\.\d+)?)\s?%(?=$|\s)", re.IGNORECASE)
 STOP_WORDS = {"and", "with", "of", "the", "to", "for", "in", "by", "per"}
 BRAND_IN_BRACKETS = re.compile(r"\[([^\[\]]+)\]")
+UNITLESS_CHAIN = re.compile(
+    r"(?<![A-Za-z0-9])(\d+(?:\.\d+)?)(?:\s*(?:/|\+|&|and)\s*(\d+(?:\.\d+)?))+",
+    re.IGNORECASE,
+)
+
+# No hard-coded INN/USAN alias folding per guidance.
 
 
 @dataclass(frozen=True)
@@ -58,6 +64,8 @@ class StrengthComponent:
 
     def bucket(self) -> tuple[str | None, str | None]:  # grouping key
         if self.kind == "single":
+            if self.unit in {None, "mg", "mcg", "g"}:
+                return ("mass_single", None)
             return (self.unit, None)
         if self.kind == "ratio":
             return (self.unit, self.denom_unit)
@@ -203,6 +211,23 @@ def extract_strengths_with_spans(text: str) -> tuple[List[StrengthComponent], Li
         components.append(StrengthComponent("single", value, unit=unit))
         spans.append((m.start(), m.end()))
 
+    # Capture unitless magnitude chains like "2.5/500" only when no explicit
+    # mass singles (mg/mcg/g) were found. This prevents noisy slashed codes in
+    # candidate strings from swamping the assignment.
+    has_mass_single = any(c.kind == "single" and c.unit in {"mg", "mcg", "g"} for c in components)
+    if not has_mass_single:
+        for m in UNITLESS_CHAIN.finditer(text):
+            if free(m.start(), m.end()):
+                chain = text[m.start(): m.end()]
+                nums = re.findall(r"\d+(?:\.\d+)?", chain)
+                if len(nums) >= 2:
+                    for n in nums:
+                        try:
+                            components.append(StrengthComponent("single", float(n), unit=None))
+                        except Exception:
+                            pass
+                    spans.append((m.start(), m.end()))
+
     return components, spans
 
 
@@ -226,6 +251,118 @@ def _unit_bucket(values: List[StrengthComponent]) -> Dict[tuple[str | None, str 
     return buckets
 
 
+def _min_cost_assignment(cost: List[List[float]], dummy_cost: float) -> tuple[float, int]:
+    """Bitmask-DP linear assignment for small matrices; returns (min_cost, real_matches).
+
+    cost: rectangular matrix (m x k). We pad to n = max(m, k) with dummy costs.
+    A pair assigned to a dummy column/row gets cost = dummy_cost and is not counted
+    as a real match in the returned real_matches.
+    """
+    if not cost:
+        return 0.0, 0
+    m = len(cost)
+    k = max(len(row) for row in cost) if m else 0
+    n = max(m, k)
+    # Build square matrix
+    sq = [[dummy_cost] * n for _ in range(n)]
+    for i in range(m):
+        row = cost[i]
+        for j in range(len(row)):
+            sq[i][j] = row[j]
+
+    from functools import lru_cache
+
+    @lru_cache(maxsize=None)
+    def dp(i: int, used_mask: int) -> float:
+        if i == n:
+            return 0.0
+        best = float("inf")
+        r = sq[i]
+        for j in range(n):
+            if not (used_mask & (1 << j)):
+                cand = r[j] + dp(i + 1, used_mask | (1 << j))
+                if cand < best:
+                    best = cand
+        return best
+
+    # Recover count of real matches using a backtrack guided by dp values.
+    total = dp(0, 0)
+    real = 0
+    i, mask = 0, 0
+    while i < n:
+        r = sq[i]
+        chosen = None
+        for j in range(n):
+            if mask & (1 << j):
+                continue
+            if abs((r[j] + dp(i + 1, mask | (1 << j))) - total) <= 1e-9:
+                chosen = j
+                total -= r[j]
+                mask |= 1 << j
+                break
+        if chosen is None:
+            break
+        if r[chosen] < dummy_cost - 1e-9:
+            real += 1
+        i += 1
+
+    return dp(0, 0), real
+
+
+def _dose_gate_and_extra(
+    q_buckets: Dict[tuple[str | None, str | None], List[float]],
+    d_buckets: Dict[tuple[str | None, str | None], List[float]],
+    *,
+    tau: float = 0.6,
+    kappa_extra: float = 0.7,
+) -> tuple[float, float]:
+    """Compute dose gate metric S_dose and extra-active penalty P_extra.
+
+    - S_dose: geometric mean of per-pair exp(-|log ratio|) across all real matches
+    - P_extra: exp(-kappa_extra * count_extras) where extras are unmatched doc values
+    """
+    eps = 1e-12
+    total_real = 0
+    sum_cost_real = 0.0
+    extras_total = 0
+    def _dedupe(vals: List[float], *, log_tol: float = 0.01, eps: float = 1e-12) -> List[float]:
+        if not vals:
+            return vals
+        vals = sorted(vals)
+        out = [vals[0]]
+        for v in vals[1:]:
+            prev = out[-1]
+            if abs(math.log(max(v, eps) / max(prev, eps))) > log_tol:
+                out.append(v)
+        return out
+
+    for bucket in q_buckets.keys() | d_buckets.keys():
+        q_vals = _dedupe(list(q_buckets.get(bucket, [])))
+        d_vals = _dedupe(list(d_buckets.get(bucket, [])))
+        if not q_vals or not d_vals:
+            continue
+        cost: List[List[float]] = []
+        for qv in q_vals:
+            row = [abs(math.log(max(qv, eps) / max(dv, eps))) for dv in d_vals]
+            cost.append(row)
+        dummy_cost = 8.0
+        total_cost, real = _min_cost_assignment(cost, dummy_cost)
+        if real > 0:
+            n = max(len(q_vals), len(d_vals))
+            real_cost_sum = total_cost - (n - real) * dummy_cost
+            sum_cost_real += max(real_cost_sum, 0.0)
+            total_real += real
+            extras_total += max(len(d_vals) - real, 0)
+    if total_real <= 0:
+        return 0.0, 1.0
+    mean_cost = sum_cost_real / total_real
+    s_dose = math.exp(-mean_cost)
+    p_extra = math.exp(-kappa_extra * extras_total)
+    if s_dose < tau:
+        return 0.0, p_extra
+    return s_dose, p_extra
+
+
 def _sim(a: float, b: float) -> float:
     if a <= 0 or b <= 0:
         return 0.0
@@ -237,40 +374,15 @@ def strength_sim(query: str, candidate: str) -> float:
     d_comp, _ = extract_strengths_with_spans(candidate)
     q_buckets = _unit_bucket(q_comp)
     d_buckets = _unit_bucket(d_comp)
-
-    total_weight = 0
-    total_score = 0.0
-    for bucket in q_buckets.keys() | d_buckets.keys():
-        q_vals = sorted(q_buckets.get(bucket, []))
-        d_vals = sorted(d_buckets.get(bucket, []))
-        if not q_vals:
-            continue
-        total_weight += len(q_vals)
-        if not d_vals:
-            continue
-        used = [False] * len(d_vals)
-        sims: List[float] = []
-        for q_val in q_vals:
-            best, idx = 0.0, -1
-            for i, d_val in enumerate(d_vals):
-                if used[i]:
-                    continue
-                score = _sim(q_val, d_val)
-                if score > best:
-                    best, idx = score, i
-            if idx >= 0:
-                used[idx] = True
-            sims.append(best)
-        if sims:
-            coverage = sum(1 for s in sims if s > 0) / len(sims)
-            closeness = sum(sims) / len(sims)
-            total_score += coverage * closeness * len(sims)
-
-    return (total_score / total_weight) if total_weight else 0.0
+    # Use the same assignment-based measure as the dose gate (without gating)
+    s_dose, p_extra = _dose_gate_and_extra(q_buckets, d_buckets, tau=0.0, kappa_extra=0.7)
+    return float(s_dose * p_extra)
 
 
 def _tokenize(text: str) -> List[str]:
     lower = text.lower()
+    # Remove brand chunks to avoid penalizing branded candidates in remainder.
+    lower = re.sub(r"\[[^\]]+\]", " ", lower)
     lower = re.sub(r"[\(\)\[\],;:]", " ", lower)
     lower = re.sub(r"[-_/]", " ", lower)
     tokens = re.split(r"[^a-z0-9]+", lower)
@@ -341,17 +453,39 @@ def simple_strength_plus_jaccard(
     w_jaccard: float = 0.4,
     w_brand_penalty: float = 0.3,
 ) -> Dict[str, float]:
+    # Dose-first: compute S_dose (gated) and P_extra from assignment; fall back to
+    # overall strength_sim for logging only.
+    q_comp, _ = extract_strengths_with_spans(query)
+    d_comp, _ = extract_strengths_with_spans(candidate)
+    q_buckets = _unit_bucket(q_comp)
+    d_buckets = _unit_bucket(d_comp)
+    s_dose, p_extra = _dose_gate_and_extra(q_buckets, d_buckets, tau=0.6, kappa_extra=0.7)
     strength = strength_sim(query, candidate)
     jaccard = jaccard_remainder(query, candidate)
     brand = brand_score(query, candidate)
+    # If gated off, score is zero regardless of other parts
+    if s_dose <= 0.0:
+        return {
+            "strength_sim": float(strength),
+            "jaccard_text": float(jaccard),
+            "brand_score": float(brand),
+            "post_score": 0.0,
+            # Back-compat alias
+            "simple_score": 0.0,
+        }
     pos_weight = max(w_strength + w_jaccard, 1e-9)
-    blended = (w_strength * strength + w_jaccard * jaccard) / pos_weight
-    simple = blended + w_brand_penalty * brand
+    # Geometric blend of (S_dose * P_extra) with remainder similarity
+    base = (max(s_dose * p_extra, 1e-12) ** w_strength) * (max(jaccard, 1e-12) ** w_jaccard)
+    base = base ** (1.0 / pos_weight)
+    brand_factor = math.exp(w_brand_penalty * brand)
+    post_score = base * brand_factor
     return {
         "strength_sim": float(strength),
         "jaccard_text": float(jaccard),
         "brand_score": float(brand),
-        "simple_score": float(simple),
+        "post_score": float(post_score),
+        # Back-compat alias
+        "simple_score": float(post_score),
     }
 
 
@@ -394,17 +528,20 @@ def batch_features(
     else:
         strength_norm = strength_scores
         jaccard_norm = jaccard_scores
-    # brand penalty is applied post-aggregation; no normalization to preserve penalty magnitude
-    simple = [
-        (w_strength * s + w_jaccard * j) / max(w_strength + w_jaccard, 1e-9)
-        + w_brand_penalty * b
-        for s, j, b in zip(strength_norm, jaccard_norm, brand_scores)
-    ]
+    pos_weight = max(w_strength + w_jaccard, 1e-9)
+    post = []
+    for s, j, b in zip(strength_norm, jaccard_norm, brand_scores):
+        gm = (max(s, 1e-12) ** w_strength) * (max(j, 1e-12) ** w_jaccard)
+        gm = gm ** (1.0 / pos_weight)
+        brand_factor = math.exp(w_brand_penalty * b)
+        post.append(gm * brand_factor)
     return {
         "strength_sim": strength_scores,
         "jaccard_text": jaccard_scores,
         "brand_score": brand_scores,
-        "simple_score": simple,
+        "post_score": post,
+        # Back-compat alias
+        "simple_score": post,
     }
 
 

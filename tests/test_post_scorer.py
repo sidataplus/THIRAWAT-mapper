@@ -26,10 +26,10 @@ def test_batch_features_minmax_option():
         "ibuprofen 200 mg tablet",
     ]
     features = ps.batch_features(q, docs, minmax_within_query=True)
-    assert list(features.keys()) == ["strength_sim", "jaccard_text", "brand_score", "simple_score"]
+    assert list(features.keys()) == ["strength_sim", "jaccard_text", "brand_score", "post_score", "simple_score"]
     assert len(features["strength_sim"]) == len(docs)
     # Scores can dip negative due to brand penalties but should remain bounded
-    assert all(-1.0 <= s <= 1.0 for s in features["simple_score"])
+    assert all(0.0 <= s <= 1.0 for s in features["post_score"])  # multiplicative post score in [0,1]
 
 
 def test_brand_score_prefers_matching_brand():

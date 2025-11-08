@@ -82,7 +82,18 @@ Input formats: CSV, TSV, Parquet, or Excel. By default the CLI expects the follo
 - `sourceName` (required)
 - `sourceCode` (optional)
 - `conceptId` (optional ground truth)
-- `mappingStatus` (used for Usagi detection)
+- `mappingStatus` (used for Usagi detection). When the input already follows the Usagi CSV schema (see `data/eval/tmt_to_rxnorm.csv`), the CLI validates a sample of rows through a Pydantic schema and surfaces a clear error if the structure is invalid. Otherwise, it synthesizes a minimal Usagi row per record so downstream exports stay consistent.
+
+Selected flags:
+
+- `--source-name-column`, `--source-code-column` – Override input headers.
+- `--label-column` – Column containing gold concept IDs (optional, default `conceptId`).
+- `--status-column`, `--approved-value` – Configure Usagi approval detection.
+- `--batch-size` – Query embedding batch size (increase for better GPU throughput).
+- `--n-limit` – Limit to the first N rows (smoke runs).
+- `--where` – Optional LanceDB filter, e.g., `vocabulary_id = 'RxNorm' AND concept_class_id != 'Ingredient'` (when those columns exist in the index).
+- `--device` – `auto|cuda|mps|cpu` (default `auto` with safe fallback and fast matmul).
+- `--post-weight` – Weight for simple post‑score blend (default `0.3`).
 
 Pipeline steps per row:
 
@@ -96,19 +107,8 @@ Outputs (written to `--out`):
 
 - `results.csv` – Classic relabel layout (wide, block‑per‑query). Columns: leading `rank` 1..K, then for each query three adjacent columns `[match_rank_or_unmatched, source_concept_name, source_concept_code]` with K rows beneath.
 - `results_with_input.csv` – Original input row with candidate columns appended.
-- `results_usagi.csv` – Only when the input looks like Usagi (`sourceName`, `mappingStatus`, `matchScore` present). For each row with at least one candidate, the first candidate populates `matchScore`, `conceptId`, `conceptName`, `domainId`, and marks `mappingStatus=UNCHECKED`, `statusSetBy=THIRAWAT-mapper`, `mappingType=MAPS_TO`.
+- `results_usagi.csv` – Always emitted. Each processed row is coerced into the Usagi schema (using the sample in `data/eval/tmt_to_rxnorm.csv` as ground truth). The top candidate populates `conceptId`, `conceptName`, `domainId`, and `matchScore` when available; otherwise those fields remain blank. Every row is marked `mappingStatus=UNCHECKED`, `statusSetBy=THIRAWAT-mapper`, `mappingType=MAPS_TO` so reviewers can import the file directly into Usagi even when the source sheet was not originally in that format.
 - `metrics.json` – When ground-truth IDs are available (either via `conceptId` or Usagi rows with `mappingStatus == APPROVED`) the file reports Hit@{1,2,5,10,20,50,100}, MRR@100, coverage, and counts.
-
-Selected flags:
-
-- `--source-name-column`, `--source-code-column` – Override input headers.
-- `--label-column` – Column containing gold concept IDs (optional, default `conceptId`).
-- `--status-column`, `--approved-value` – Configure Usagi approval detection.
-- `--batch-size` – Query embedding batch size (increase for better GPU throughput).
-- `--n-limit` – Limit to the first N rows (smoke runs).
-- `--where` – Optional LanceDB filter, e.g., `vocabulary_id = 'RxNorm' AND concept_class_id != 'Ingredient'` (when those columns exist in the index).
-- `--device` – `auto|cuda|mps|cpu` (default `auto` with safe fallback and fast matmul).
-- `--post-weight` – Weight for simple post‑score blend (default `0.3`).
 
 ### 2.1 LLM-assisted RAG reranking
 
@@ -117,7 +117,7 @@ Bulk inference can optionally send the top reranked candidates to an LLM for tie
 General RAG knobs:
 
 ```
---rag-provider {cloudflare,ollama,llamacpp}
+--rag-provider {cloudflare,ollama,openrouter,llamacpp}
 --rag-model MODEL_ID                # default openai/gpt-oss-20b
 --rag-candidate-limit 50            # number of reranked candidates passed to the LLM
 --rag-profile-char-limit 512        # truncate long profile_text snippets
@@ -212,6 +212,28 @@ llama.cpp flags:
 If you omit `--llamacpp-base-url`, the CLI falls back to the python bindings and expects `--llamacpp-model-path` to point to a local GGUF file (plus any `--llamacpp-n-*` overrides). In that mode, the `rag-model` flag is ignored and the file name controls which model loads.
 
 For all providers, the CLI logs each prompt/response pair and the parsed candidate ordering to `rag_prompts.md` in the `--out` directory for downstream review.
+
+#### OpenRouter (hosted multi-model API)
+
+```
+export OPENROUTER_API_KEY=<YOUR_KEY>
+
+uv run python -m thirawat_mapper_beta.infer.bulk \
+  --db data/lancedb/drug_major \
+  --table drug_major \
+  --input data/input/A10.csv \
+  --out runs/a10_openrouter_rag \
+  --rag-provider openrouter \
+  --rag-model openrouter/polaris-alpha
+```
+
+Flags:
+
+```
+--openrouter-base-url https://openrouter.ai/api/v1   # override if self-hosting a proxy
+```
+
+Set `OPENROUTER_API_KEY` in your environment; the CLI will refuse to call OpenRouter without it. Models follow the OpenRouter catalog (e.g., `openrouter/google/gemini-flash-1.5`, `openrouter/meta-llama/llama-3.1-70b-instruct`).
 
 
 ## 3. Interactive Query (REPL)

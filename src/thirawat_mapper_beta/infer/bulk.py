@@ -11,7 +11,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set
 import pandas as pd
 from tqdm.auto import tqdm
 
-from thirawat_mapper_beta.io import export_relabel_csv
+from thirawat_mapper_beta.io import coerce_usagi_row, export_relabel_csv, is_usagi_format, validate_usagi_frame
 from thirawat_mapper_beta.models import (
     CloudflareConfig,
     CloudflareLLMClient,
@@ -21,6 +21,8 @@ from thirawat_mapper_beta.models import (
     LlamaCppServerLLMClient,
     OllamaConfig,
     OllamaLLMClient,
+    OpenRouterConfig,
+    OpenRouterLLMClient,
     RAGPipeline,
     RAGPromptBuilder,
     SapBERTEmbedder,
@@ -28,8 +30,15 @@ from thirawat_mapper_beta.models import (
     ThirawatReranker,
     to_candidates,
 )
-from .utils import configure_torch_for_infer, minmax_normalize, resolve_device
-from thirawat_mapper_beta.scoring import batch_features
+from .conversion import convert_inn_ban_to_usan
+from .utils import (
+    configure_torch_for_infer,
+    minmax_normalize,
+    resolve_device,
+    rank_candidates,
+    enrich_with_post_scores,
+    sanitize_query_text,
+)
 from thirawat_mapper_beta.utils import connect_table, normalize_text_value
 
 
@@ -182,6 +191,17 @@ def _build_rag_pipeline(
             keep_alive=args.ollama_keep_alive,
         )
         llm_client = OllamaLLMClient(cfg)
+    elif provider == "openrouter":
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            raise ValueError("openrouter provider requires OPENROUTER_API_KEY to be set in the environment.")
+        model_name = args.rag_model or "openrouter/polaris-alpha"
+        cfg = OpenRouterConfig(
+            api_key=api_key,
+            model_name=model_name,
+            base_url=args.openrouter_base_url,
+        )
+        llm_client = OpenRouterLLMClient(cfg)
     elif provider == "llamacpp":
         base_url = getattr(args, "llamacpp_base_url", None)
         if base_url:
@@ -295,6 +315,12 @@ class ConceptClassResolver:
 def run(args: argparse.Namespace) -> None:
     table, vector_column = connect_table(args.db, args.table)
     df = _load_input(Path(args.input))
+    input_is_usagi = False
+    if not df.empty and is_usagi_format(df.columns):
+        try:
+            input_is_usagi = validate_usagi_frame(df)
+        except ValueError as exc:  # pragma: no cover - defensive
+            raise SystemExit(f"Input file failed Usagi validation: {exc}") from exc
     # Optional row limit for smoke/testing
     if getattr(args, "n_limit", 0):
         try:
@@ -307,7 +333,16 @@ def run(args: argparse.Namespace) -> None:
         raise SystemExit("Input file contained no rows")
 
     queries = _prepare_queries(df, args.source_name_column, args.source_code_column)
-    queries_norm = [normalize_text_value(q) for q in queries]
+    if getattr(args, "strip_non_latin", False) or getattr(args, "strip_chars", ""):
+        queries_sanitized = [
+            sanitize_query_text(q, strip_non_latin=bool(args.strip_non_latin), strip_chars=str(args.strip_chars or ""))
+            for q in queries
+        ]
+    else:
+        queries_sanitized = queries
+    if getattr(args, "convert_inn_to_usan", False):
+        queries_sanitized = [convert_inn_ban_to_usan(q) for q in queries_sanitized]
+    queries_norm = [normalize_text_value(q) for q in queries_sanitized]
 
     device = resolve_device(args.device)
     configure_torch_for_infer(device)
@@ -354,7 +389,23 @@ def run(args: argparse.Namespace) -> None:
         query_text_norm = queries_norm[idx]
         row = df.iloc[idx]
         query_vec = vectors[idx]
-        source_code = str(row.get(args.source_code_column, "") or "") if args.source_code_column else None
+        source_name_value = row.get(args.source_name_column, None)
+        source_code_value = None
+        if args.source_code_column:
+            code_raw = row.get(args.source_code_column, None)
+            if code_raw is not None and not (isinstance(code_raw, float) and pd.isna(code_raw)):
+                code_text = str(code_raw).strip()
+                if code_text:
+                    source_code_value = code_text
+
+        input_row = row.to_dict()
+        usagi_row = coerce_usagi_row(
+            input_row,
+            row_index=idx,
+            source_name=source_name_value,
+            source_code=source_code_value,
+            source_code_field=args.source_code_column,
+        )
 
         builder = table.search(
             query_vec.astype(float).tolist(),
@@ -408,46 +459,16 @@ def run(args: argparse.Namespace) -> None:
                 ].reset_index(drop=True)
 
         if not df_candidates.empty:
-            cands_text = [normalize_text_value(t) for t in df_candidates["profile_text"].astype(str).tolist()]
-            features = batch_features(
+            df_candidates = enrich_with_post_scores(
+                df_candidates,
                 query_text_norm,
-                cands_text,
-                w_strength=float(args.post_strength_weight),
-                w_jaccard=float(args.post_jaccard_weight),
-                w_brand_penalty=float(args.post_brand_penalty),
-                minmax_within_query=False,
+                post_strength_weight=float(args.post_strength_weight),
+                post_jaccard_weight=float(args.post_jaccard_weight),
+                post_brand_penalty=float(args.post_brand_penalty),
+                post_minmax=bool(args.post_minmax),
+                post_weight=float(args.post_weight),
+                prefer_brand=True,
             )
-            df_candidates["strength_sim"] = features["strength_sim"]
-            df_candidates["jaccard_text"] = features["jaccard_text"]
-            df_candidates["_brand_score"] = features["brand_score"]
-            # Optional per-query min-max normalization for simple features
-            if args.post_minmax:
-                s_feat = minmax_normalize(df_candidates["strength_sim"].astype(float))
-                j_feat = minmax_normalize(df_candidates["jaccard_text"].astype(float))
-            else:
-                s_feat = df_candidates["strength_sim"].astype(float)
-                j_feat = df_candidates["jaccard_text"].astype(float)
-            denom = max(float(args.post_strength_weight) + float(args.post_jaccard_weight), 1e-9)
-            blended = (float(args.post_strength_weight) * s_feat + float(args.post_jaccard_weight) * j_feat) / denom
-            df_candidates["simple_score"] = blended + float(args.post_brand_penalty) * df_candidates["_brand_score"].astype(float)
-            relevance = df_candidates.get("_relevance_score", pd.Series([0.0] * len(df_candidates)))
-            w = float(args.post_weight)
-            df_candidates["final_score"] = (1.0 - w) * relevance.fillna(0.0) + w * df_candidates["simple_score"]
-            sort_columns = []
-            if "_brand_score" in df_candidates.columns:
-                sort_columns.append(("_brand_score", False))
-            sort_columns.extend(
-                [
-                    ("final_score", False),
-                    ("strength_sim", False),
-                    ("jaccard_text", False),
-                ]
-            )
-            by = [col for col, _ in sort_columns]
-            ascending = [asc for _, asc in sort_columns]
-            df_candidates = df_candidates.sort_values(by, ascending=ascending).reset_index(drop=True)
-            if "_brand_score" in df_candidates.columns:
-                df_candidates = df_candidates.drop(columns="_brand_score")
         else:
             df_candidates = pd.DataFrame(columns=["concept_id", "concept_name", "profile_text", "final_score"])
 
@@ -516,10 +537,11 @@ def run(args: argparse.Namespace) -> None:
                 gold = row.get(fallback_col)
 
         record: Dict[str, object] = {
-            "source_name": row.get(args.source_name_column),
-            "source_code": source_code,
+            "source_name": source_name_value,
+            "source_code": source_code_value,
             "candidates": df_candidates.head(args.candidate_topk),
-            "input_row": row.to_dict(),
+            "input_row": input_row,
+            "usagi_row": usagi_row,
         }
         if gold is not None and gold != "":
             record["gold_concept_id"] = gold
@@ -583,7 +605,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--where", default=None, help="Optional LanceDB filter expression, e.g. vocabulary_id = 'RxNorm'")
     # Reranker is fixed to BMS in beta; no additional flags
     # Post-scorer controls
-    parser.add_argument("--post-weight", type=float, default=0.3, help="Weight for simple post-score in final blend (0.0 = ML only)")
+    parser.add_argument("--post-weight", type=float, default=0.05, help="Weight for simple post-score in final blend (0.0 = ML only)")
     parser.add_argument("--post-strength-weight", type=float, default=0.6, help="Weight for strength feature within simple score")
     parser.add_argument("--post-jaccard-weight", type=float, default=0.4, help="Weight for jaccard feature within simple score")
     parser.add_argument(
@@ -595,6 +617,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--post-minmax", action=argparse.BooleanOptionalAction, default=True, help="Enable per-query min-max normalization of simple features (default: enabled)")
     parser.add_argument("--source-name-column", default="sourceName", help="Column containing source names")
     parser.add_argument("--source-code-column", default="sourceCode", help="Column containing source codes")
+    parser.add_argument(
+        "--strip-non-latin",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Remove non‑Latin characters from query before retrieval/rerank",
+    )
+    parser.add_argument(
+        "--strip-chars",
+        default="",
+        help="Characters to remove from query before retrieval/rerank (e.g., '()[]{}').",
+    )
+    parser.add_argument(
+        "--convert-inn-to-usan",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Normalize INN/BAN terms in the query to USAN counterparts before retrieval.",
+    )
     parser.add_argument(
         "--label-column",
         default="conceptId",
@@ -619,7 +658,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     rag_group = parser.add_argument_group("LLM RAG")
     rag_group.add_argument(
         "--rag-provider",
-        choices=["cloudflare", "ollama", "llamacpp"],
+        choices=["cloudflare", "ollama", "openrouter", "llamacpp"],
         help="Enable LLM reranking with the specified provider.",
     )
     rag_group.add_argument(
@@ -725,6 +764,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--ollama-keep-alive",
         default=None,
         help="Optional keep_alive value for the Ollama server (e.g., 5m).",
+    )
+
+    openrouter_group = parser.add_argument_group("OpenRouter provider")
+    openrouter_group.add_argument(
+        "--openrouter-base-url",
+        default="https://openrouter.ai/api/v1",
+        help="Base URL for the OpenRouter API (default: https://openrouter.ai/api/v1).",
     )
 
     llama_group = parser.add_argument_group("llamacpp provider")

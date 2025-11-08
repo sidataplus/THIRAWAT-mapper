@@ -37,6 +37,8 @@ dependencies = [
   "pylate>=1.3",
   "datasets>=4.0",
   "tqdm>=4.66",
+  "openpyxl>=3.1.5",
+  "pydantic>=2.7",
 ]
 
 [tool.uv]

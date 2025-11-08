@@ -123,20 +123,26 @@ def export_relabel_csv(
         appended_record.update(candidate_columns)
         appended_records.append(appended_record)
 
-        if isinstance(input_row, Mapping) and {"sourceName", "mappingStatus", "matchScore"}.issubset(input_row.keys()):
-            if candidate_columns.get("top1_concept_id") is not None:
-                usagi_record: MutableMapping[str, object] = dict(input_row)
-                usagi_record["matchScore"] = candidate_columns.get("top1_score")
-                usagi_record["mappingStatus"] = "UNCHECKED"
-                usagi_record["statusSetBy"] = "THIRAWAT-mapper"
-                usagi_record["conceptId"] = candidate_columns.get("top1_concept_id")
-                usagi_record["conceptName"] = candidate_columns.get("top1_concept_name")
+        usagi_payload: Optional[MutableMapping[str, object]] = None
+        if isinstance(row.get("usagi_row"), Mapping):
+            usagi_payload = dict(row["usagi_row"])  # type: ignore[index]
+        elif isinstance(input_row, Mapping) and {"sourceName", "mappingStatus", "matchScore"}.issubset(input_row.keys()):
+            usagi_payload = dict(input_row)
+
+        if usagi_payload is not None:
+            top1_id = candidate_columns.get("top1_concept_id")
+            if top1_id is not None:
+                usagi_payload["conceptId"] = top1_id
+                usagi_payload["conceptName"] = candidate_columns.get("top1_concept_name")
+                usagi_payload["matchScore"] = candidate_columns.get("top1_score")
                 domain_candidate = candidate_columns.get("top1_domain_id")
-                if domain_candidate is None and isinstance(input_row, Mapping):
-                    domain_candidate = input_row.get("domainId")
-                usagi_record["domainId"] = domain_candidate
-                usagi_record["mappingType"] = "MAPS_TO"
-                usagi_records.append(usagi_record)
+                if domain_candidate is None:
+                    domain_candidate = usagi_payload.get("domainId")
+                usagi_payload["domainId"] = domain_candidate
+            usagi_payload["mappingStatus"] = "UNCHECKED"
+            usagi_payload["statusSetBy"] = "THIRAWAT-mapper"
+            usagi_payload["mappingType"] = usagi_payload.get("mappingType") or "MAPS_TO"
+            usagi_records.append(usagi_payload)
 
     # Construct classic relabel CSV frame (wide blocks) per reference format
     classic_csv = out_path / results_filename

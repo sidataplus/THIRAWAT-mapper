@@ -26,6 +26,12 @@ def test_export_relabel_csv_writes_expected_layout(tmp_path: Path):
                 "matchScore": 0.0,
                 "conceptId": 11,
             },
+            "usagi_row": {
+                "sourceName": "Query A",
+                "sourceCode": "A1",
+                "mappingStatus": "APPROVED",
+                "matchScore": 0.0,
+            },
         },
         {
             "source_name": "Query B",
@@ -43,6 +49,12 @@ def test_export_relabel_csv_writes_expected_layout(tmp_path: Path):
                 "mappingStatus": "PENDING",
                 "matchScore": 0.0,
                 "conceptId": 33,
+            },
+            "usagi_row": {
+                "sourceName": "Query B",
+                "sourceCode": "B1",
+                "mappingStatus": "PENDING",
+                "matchScore": 0.0,
             },
         },
     ]
@@ -83,13 +95,14 @@ def test_export_relabel_csv_writes_expected_layout(tmp_path: Path):
     assert "top1_concept_id" in df_appended.columns
     assert df_appended.loc[df_appended["sourceName"] == "Query B", "top1_concept_id"].iat[0] == 44
 
-    # Usagi CSV should not be None because first row looked like Usagi input
+    # Usagi CSV should exist because explicit rows were provided
     assert usagi_path is not None and usagi_path.exists()
     df_usagi = pd.read_csv(usagi_path)
     assert set(["conceptId", "matchScore"]).issubset(df_usagi.columns)
+    assert (df_usagi["statusSetBy"] == "THIRAWAT-mapper").all()
 
 
-def test_export_relabel_csv_without_usagi(tmp_path: Path):
+def test_export_relabel_csv_injects_usagi_rows(tmp_path: Path):
     rows = [
         {
             "source_name": "Query C",
@@ -100,8 +113,14 @@ def test_export_relabel_csv_without_usagi(tmp_path: Path):
                 "concept_name": ["Concept X", "Concept Y"],
                 "final_score": [0.75, 0.5],
             }),
-            # input_row lacks mappingStatus/matchScore -> should not produce Usagi export
+            # input_row lacks mappingStatus/matchScore, but explicit usagi_row is provided
             "input_row": {"sourceName": "Query C"},
+            "usagi_row": {
+                "sourceName": "Query C",
+                "sourceCode": "C1",
+                "mappingStatus": "UNCHECKED",
+                "matchScore": 0.0,
+            },
         }
     ]
 
@@ -113,7 +132,7 @@ def test_export_relabel_csv_without_usagi(tmp_path: Path):
 
     assert csv_path.exists()
     assert appended_path.exists()
-    assert usagi_path is None
-
-    metrics_path = tmp_path / "metrics.json"
-    assert not metrics_path.exists()
+    assert usagi_path is not None and usagi_path.exists()
+    df_usagi = pd.read_csv(usagi_path)
+    assert df_usagi.at[0, "conceptId"] == 55
+    assert df_usagi.at[0, "mappingStatus"] == "UNCHECKED"
