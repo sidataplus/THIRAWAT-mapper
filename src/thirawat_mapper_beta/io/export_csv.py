@@ -19,6 +19,7 @@ def export_relabel_csv(
     results_filename: str = "results.csv",
     appended_filename: str = "results_with_input.csv",
     usagi_filename: str = "results_usagi.csv",
+    preserve_input_order: bool = False,
 ) -> tuple[Path, Path, Optional[Path]]:
     """Write inference results in two wide CSV formats.
 
@@ -192,15 +193,25 @@ def export_relabel_csv(
                     else:
                         rows_block.append(["", "", ""])
                 block_df = pd.DataFrame(rows_block, columns=[rank_header, query_text, source_code])
-                blocks.append({"gold_rank": gold_rank, "source_code": source_code, "frame": block_df})
+                blocks.append({
+                    "gold_rank": gold_rank,
+                    "source_code": source_code,
+                    "frame": block_df,
+                    "order": len(blocks),
+                })
 
-            def sort_key(item: dict) -> tuple[int, float, str]:
-                gr = item["gold_rank"]
-                if gr is None:
-                    return (1, float("inf"), item["source_code"])  # unmatched last
-                return (0, float(gr), item["source_code"])  # matched first, lower rank first
+            if preserve_input_order:
+                ordered_blocks = blocks
+            else:
+                def sort_key(item: dict) -> tuple[int, float, str]:
+                    gr = item["gold_rank"]
+                    if gr is None:
+                        return (1, float("inf"), item["source_code"])  # unmatched last
+                    return (0, float(gr), item["source_code"])  # matched first, lower rank first
 
-            frames = [b["frame"] for b in sorted(blocks, key=sort_key)] if blocks else []
+                ordered_blocks = sorted(blocks, key=sort_key)
+
+            frames = [b["frame"] for b in ordered_blocks] if ordered_blocks else []
             if frames:
                 wide = pd.concat(frames, axis=1)
                 # Add rank column on the left

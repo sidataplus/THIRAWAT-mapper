@@ -105,7 +105,7 @@ Pipeline steps per row:
 
 Outputs (written to `--out`):
 
-- `results.csv` – Classic relabel layout (wide, block‑per‑query). Columns: leading `rank` 1..K, then for each query three adjacent columns `[match_rank_or_unmatched, source_concept_name, source_concept_code]` with K rows beneath.
+- `results.csv` – Classic relabel layout (wide, block‑per‑query). Columns: leading `rank` 1..K, then for each query three adjacent columns `[match_rank_or_unmatched, source_concept_name, source_concept_code]` with K rows beneath. Non‑Usagi inputs preserve the original row order; Usagi inputs continue to sort matched rows first so reviewers can focus on confirmed gold IDs.
 - `results_with_input.csv` – Original input row with candidate columns appended.
 - `results_usagi.csv` – Always emitted. Each processed row is coerced into the Usagi schema (using the sample in `data/eval/tmt_to_rxnorm.csv` as ground truth). The top candidate populates `conceptId`, `conceptName`, `domainId`, and `matchScore` when available; otherwise those fields remain blank. Every row is marked `mappingStatus=UNCHECKED`, `statusSetBy=THIRAWAT-mapper`, `mappingType=MAPS_TO` so reviewers can import the file directly into Usagi even when the source sheet was not originally in that format.
 - `metrics.json` – When ground-truth IDs are available (either via `conceptId` or Usagi rows with `mappingStatus == APPROVED`) the file reports Hit@{1,2,5,10,20,50,100}, MRR@100, coverage, and counts.

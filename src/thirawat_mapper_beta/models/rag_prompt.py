@@ -120,10 +120,14 @@ Answer (illustrative):
 - If none of the candidates satisfy the rules, reorder top 10 candidates as best as you can.
 - Respond with a comma-separated list of the candidate texts exactly as written.
 
+---
 
-Query: {source}
+## Query 
 
-Candidates (pre-ranked list):
+{source}
+
+## Candidates (pre-ranked list)
+
 {candidates}
 """
 

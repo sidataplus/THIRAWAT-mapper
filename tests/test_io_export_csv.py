@@ -6,6 +6,17 @@ import pandas as pd
 from thirawat_mapper_beta.io.export_csv import export_relabel_csv
 
 
+def _block_order(df: pd.DataFrame) -> list[str]:
+    block_order: list[str] = []
+    if df.shape[1] <= 1:
+        return block_order
+    n_blocks = (df.shape[1] - 1) // 3
+    for i in range(n_blocks):
+        start = 1 + i * 3
+        block_order.append(df.columns[start + 2])
+    return block_order
+
+
 def test_export_relabel_csv_writes_expected_layout(tmp_path: Path):
     rows = [
         {
@@ -136,3 +147,47 @@ def test_export_relabel_csv_injects_usagi_rows(tmp_path: Path):
     df_usagi = pd.read_csv(usagi_path)
     assert df_usagi.at[0, "conceptId"] == 55
     assert df_usagi.at[0, "mappingStatus"] == "UNCHECKED"
+
+
+def test_export_relabel_csv_preserves_input_order_when_requested(tmp_path: Path):
+    rows = [
+        {
+            "source_name": "First",
+            "source_code": "F1",
+            "gold_concept_id": 99,
+            "candidates": pd.DataFrame(
+                {
+                    "concept_id": [11],
+                    "concept_name": ["Concept X"],
+                    "final_score": [0.4],
+                }
+            ),
+            "input_row": {"sourceName": "First"},
+        },
+        {
+            "source_name": "Second",
+            "source_code": "S1",
+            "gold_concept_id": 22,
+            "candidates": pd.DataFrame(
+                {
+                    "concept_id": [22],
+                    "concept_name": ["Concept Y"],
+                    "final_score": [0.9],
+                }
+            ),
+            "input_row": {"sourceName": "Second"},
+        },
+    ]
+
+    csv_sorted, _, _ = export_relabel_csv(rows, out_dir=tmp_path / "sorted", topk=1)
+    df_sorted = pd.read_csv(csv_sorted)
+    assert _block_order(df_sorted) == ["S1", "F1"]  # matched rows first
+
+    csv_preserved, _, _ = export_relabel_csv(
+        rows,
+        out_dir=tmp_path / "preserve",
+        topk=1,
+        preserve_input_order=True,
+    )
+    df_preserved = pd.read_csv(csv_preserved)
+    assert _block_order(df_preserved) == ["F1", "S1"]

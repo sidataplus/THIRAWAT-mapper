@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 from pathlib import Path
@@ -66,11 +67,7 @@ def _prepare_queries(df: pd.DataFrame, name_col: str, code_col: str | None) -> L
         if not name:
             queries.append("")
             continue
-        code = str(row.get(code_col, "") or "").strip() if code_col else ""
-        if code:
-            queries.append(f"{name} ({code})")
-        else:
-            queries.append(name)
+        queries.append(name)
     return queries
 
 
@@ -363,6 +360,7 @@ def run(args: argparse.Namespace) -> None:
     rag_extra_context_column = getattr(args, "rag_extra_context_column", None)
     results: List[Dict[str, object]] = []
     rag_prompt_logs: List[Dict[str, object]] = []
+    error_logs: List[Dict[str, object]] = []
 
     status_series = df[args.status_column] if args.status_column in df.columns else None
     exclude_concept_class_ids = _to_exclusion_set(getattr(args, "exclude_concept_class_id", None))
@@ -429,6 +427,15 @@ def run(args: argparse.Namespace) -> None:
         except Exception as exc:
             failures += 1
             print(f"[warn] search/rerank failed for row {idx}: {exc}")
+            error_logs.append(
+                {
+                    "type": "search",
+                    "index": idx,
+                    "source_name": source_name_value,
+                    "source_code": source_code_value,
+                    "message": str(exc),
+                }
+            )
             df_candidates = pd.DataFrame(columns=["concept_id", "profile_text", "concept_name"])
 
         keep_cols = [
@@ -517,13 +524,22 @@ def run(args: argparse.Namespace) -> None:
                         {
                             "index": idx,
                             "source_name": query_text,
-                            "source_code": source_code,
+                            "source_code": source_code_value,
                             "prompt": rag_prompt,
                             "response": rag_response,
                         }
                     )
                 except Exception as exc:
                     print(f"[warn] RAG rerank failed for row {idx}: {exc}")
+                    error_logs.append(
+                        {
+                            "type": "rag",
+                            "index": idx,
+                            "source_name": query_text,
+                            "source_code": source_code_value,
+                            "message": str(exc),
+                        }
+                    )
 
         gold = None
         if args.label_column and args.label_column in df.columns:
@@ -579,11 +595,29 @@ def run(args: argparse.Namespace) -> None:
                     fh.write("\n```\n\n")
             fh.write("\n")
 
+    if error_logs:
+        errors_path = Path(args.out) / "errors.log"
+        errors_path.parent.mkdir(parents=True, exist_ok=True)
+        with errors_path.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["index", "type", "source_name", "source_code", "message"])
+            for err in error_logs:
+                writer.writerow(
+                    [
+                        err.get("index"),
+                        err.get("type", "error"),
+                        err.get("source_name") or "",
+                        err.get("source_code") or "",
+                        err.get("message") or "",
+                    ]
+                )
+
     export_relabel_csv(
         results,
         args.out,
         topk=args.candidate_topk,
         metrics=metrics,
+        preserve_input_order=not input_is_usagi,
     )
 
 
