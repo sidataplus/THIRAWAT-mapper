@@ -14,7 +14,15 @@ MPS on Apple Silicon can produce unstable embeddings/scores with the current bet
 
 ## Prerequisites
 
-All commands below assume you are using [`uv`](https://docs.astral.sh/uv/getting-started/installation/).
+### Environment
+
+1. Python
+2. [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
+
+### OHDSI Standard Concepts
+
+1. Request and download the standard concepts in csv format from [https://athena.ohdsi.org/](https://athena.ohdsi.org/)
+2. Convert the csv files into a DuckDB database using [sidataplus/athena2duckdb](https://github.com/sidataplus/athena2duckdb)
 
 ### Model access
 
