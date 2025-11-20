@@ -4,21 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "thirawat-mapper-beta"
-version = "0.1.0"
+version = "0.1.1"
 description = "Minimal indexing and inference toolkit for terminology mapping."
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
-authors = [{ name = "SIDATA Terminology Team", email = "max@sidata.plus" }]
-classifiers = [
-  "Development Status :: 3 - Alpha",
-  "Intended Audience :: Healthcare Industry",
-  "License :: Other/Proprietary License",
-  "Programming Language :: Python",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Topic :: Scientific/Engineering :: Medical Science Apps.",
-]
+authors = [{ name = "Natthawut Max Adulyanukosol", email = "max@sidata.plus" }]
+
 dependencies = [
   "duckdb>=0.10",
   "lance>=0.13",
@@ -41,8 +32,8 @@ dependencies = [
   "pydantic>=2.7",
 ]
 
-[tool.uv]
-dev-dependencies = ["pytest>=8.0"]
+[dependency-groups]
+dev = ["pytest>=8.0"]
 
 [project.urls]
 Repository = "https://sidata.plus/projects/thirawat-mapper-beta"

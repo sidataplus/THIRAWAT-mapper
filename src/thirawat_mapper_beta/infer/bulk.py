@@ -7,7 +7,7 @@ import csv
 import json
 import os
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
 import pandas as pd
 from tqdm.auto import tqdm
@@ -32,6 +32,7 @@ from thirawat_mapper_beta.models import (
     to_candidates,
 )
 from .conversion import convert_inn_ban_to_usan
+from .shared_filters import ConceptClassResolver, safe_int, to_exclusion_set
 from .utils import (
     configure_torch_for_infer,
     minmax_normalize,
@@ -39,6 +40,7 @@ from .utils import (
     rank_candidates,
     enrich_with_post_scores,
     sanitize_query_text,
+    normalize_strength_spacing,
 )
 from thirawat_mapper_beta.utils import connect_table, normalize_text_value
 
@@ -231,82 +233,12 @@ def _build_rag_pipeline(
     return pipeline, candidate_limit, stop_sequences
 
 
-def _safe_int(value: object) -> Optional[int]:
-    if value is None:
-        return None
-    try:
-        if pd.isna(value):
-            return None
-    except Exception:
-        pass
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _to_exclusion_set(values: Sequence[str] | None) -> Set[str]:
-    excluded: Set[str] = set()
-    if not values:
-        return excluded
-    for raw in values:
-        if not raw:
-            continue
-        for piece in str(raw).split(","):
-            item = piece.strip()
-            if item:
-                excluded.add(item)
-    return excluded
-
-
 def _apply_brand_penalty(
     query_text: str,
     df_candidates: pd.DataFrame,
     ordered_concept_ids: List[int],
 ) -> List[int]:
     return ordered_concept_ids
-
-
-class ConceptClassResolver:
-    """Resolve concept_class_id values using DuckDB metadata when not present in LanceDB."""
-
-    def __init__(self, duckdb_path: Path, concepts_table: str) -> None:
-        self.duckdb_path = duckdb_path
-        self.concepts_table = concepts_table
-        self._cache: Dict[int, Optional[str]] = {}
-        self._conn = None
-        self._failed = False
-
-    def _ensure_conn(self) -> None:
-        if self._conn is None:
-            try:
-                import duckdb  # type: ignore
-            except ImportError:
-                raise RuntimeError("duckdb is required to resolve concept_class_id exclusions.")
-            self._conn = duckdb.connect(str(self.duckdb_path))
-
-    def lookup(self, concept_ids: Sequence[int]) -> Dict[int, Optional[str]]:
-        pending = [cid for cid in concept_ids if cid not in self._cache]
-        if pending and not self._failed:
-            try:
-                self._ensure_conn()
-                if not pending:
-                    pass
-                placeholders = ",".join(str(int(cid)) for cid in pending)
-                query = f"SELECT concept_id, concept_class_id FROM {self.concepts_table} WHERE concept_id IN ({placeholders})"
-                df = self._conn.execute(query).df()  # type: ignore[union-attr]
-                fetched = {
-                    int(row["concept_id"]): (str(row["concept_class_id"]) if row["concept_class_id"] is not None else None)
-                    for _, row in df.iterrows()
-                }
-                for cid in pending:
-                    self._cache[cid] = fetched.get(cid)
-            except Exception as exc:
-                print(f"[warn] Failed to resolve concept_class_id from DuckDB: {exc}")
-                self._failed = True
-                for cid in pending:
-                    self._cache[cid] = None
-        return {cid: self._cache.get(cid) for cid in concept_ids}
 
 
 def run(args: argparse.Namespace) -> None:
@@ -339,6 +271,7 @@ def run(args: argparse.Namespace) -> None:
         queries_sanitized = queries
     if getattr(args, "convert_inn_to_usan", False):
         queries_sanitized = [convert_inn_ban_to_usan(q) for q in queries_sanitized]
+    queries_sanitized = [normalize_strength_spacing(q) for q in queries_sanitized]
     queries_norm = [normalize_text_value(q) for q in queries_sanitized]
 
     device = resolve_device(args.device)
@@ -363,23 +296,26 @@ def run(args: argparse.Namespace) -> None:
     error_logs: List[Dict[str, object]] = []
 
     status_series = df[args.status_column] if args.status_column in df.columns else None
-    exclude_concept_class_ids = _to_exclusion_set(getattr(args, "exclude_concept_class_id", None))
+    manifest_path = Path(args.db) / f"{args.table}_manifest.json"
+    duckdb_path: Optional[str] = None
+    concepts_table: Optional[str] = None
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+            duckdb_path = manifest.get("duckdb")
+            concepts_table = manifest.get("concepts_table")
+        except Exception as exc:
+            print(f"[warn] Failed to read manifest metadata: {exc}")
+    else:
+        manifest = None
+
+    exclude_concept_class_ids = to_exclusion_set(getattr(args, "exclude_concept_class_id", None))
     concept_class_resolver: Optional[ConceptClassResolver] = None
     if exclude_concept_class_ids:
-        manifest_path = Path(args.db) / f"{args.table}_manifest.json"
-        if manifest_path.exists():
-            try:
-                manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
-                duckdb_path = manifest.get("duckdb")
-                concepts_table = manifest.get("concepts_table")
-                if duckdb_path and concepts_table:
-                    concept_class_resolver = ConceptClassResolver(Path(duckdb_path), str(concepts_table))
-                else:
-                    print("[warn] Manifest missing duckdb or concepts_table; concept_class exclusions unavailable.")
-            except Exception as exc:
-                print(f"[warn] Failed to read manifest for concept_class exclusions: {exc}")
+        if duckdb_path and concepts_table:
+            concept_class_resolver = ConceptClassResolver(Path(duckdb_path), str(concepts_table))
         else:
-            print("[warn] LanceDB manifest not found; concept_class exclusions unavailable.")
+            print("[warn] Concept class exclusions unavailable (missing duckdb manifest info).")
 
     failures = 0
     for idx in tqdm(range(len(queries)), desc="Infer", unit="q"):
@@ -416,13 +352,11 @@ def run(args: argparse.Namespace) -> None:
             except Exception as _:
                 pass
         try:
-            arrow_table = (
-                builder.distance_type("cosine")
-                .limit(args.candidate_topk)
-                .rerank(reranker=reranker, query_string=query_text_norm)
-                .limit(args.candidate_topk)
-                .to_arrow()
-            )
+            retrieval_topk = max(args.candidate_topk, args.retrieval_topk)
+            result_builder = builder.distance_type("cosine").limit(retrieval_topk)
+            if not args.no_rerank:
+                result_builder = result_builder.rerank(reranker=reranker, query_string=query_text_norm)
+            arrow_table = result_builder.limit(args.candidate_topk).to_arrow()
             df_candidates = arrow_table.to_pandas()
         except Exception as exc:
             failures += 1
@@ -445,6 +379,7 @@ def run(args: argparse.Namespace) -> None:
                 "concept_name",
                 "domain_id",
                 "concept_class_id",
+                "vocabulary_id",
                 "profile_text",
                 "_relevance_score",
             ]
@@ -454,11 +389,11 @@ def run(args: argparse.Namespace) -> None:
 
         if exclude_concept_class_ids:
             if "concept_class_id" not in df_candidates.columns and concept_class_resolver is not None:
-                concept_ids_list = [cid for cid in df_candidates["concept_id"].apply(_safe_int).tolist() if cid is not None]
+                concept_ids_list = [cid for cid in df_candidates["concept_id"].apply(safe_int).tolist() if cid is not None]
                 if concept_ids_list:
                     mapping = concept_class_resolver.lookup(concept_ids_list)
                     df_candidates["concept_class_id"] = [
-                        mapping.get(_safe_int(cid)) for cid in df_candidates["concept_id"].tolist()
+                        mapping.get(safe_int(cid)) for cid in df_candidates["concept_id"].tolist()
                     ]
             if "concept_class_id" in df_candidates.columns:
                 df_candidates = df_candidates[
@@ -475,6 +410,7 @@ def run(args: argparse.Namespace) -> None:
                 post_minmax=bool(args.post_minmax),
                 post_weight=float(args.post_weight),
                 prefer_brand=True,
+                rank_output=False,
             )
         else:
             df_candidates = pd.DataFrame(columns=["concept_id", "concept_name", "profile_text", "final_score"])
@@ -504,7 +440,7 @@ def run(args: argparse.Namespace) -> None:
                     score_lookup = {cid: score for cid, score in zip(rag_result.concept_ids, rag_result.scores)}
                     order_map = {cid: idx for idx, cid in enumerate(adjusted_ids)}
                     base_order = pd.Series(range(len(df_candidates)), index=df_candidates.index, dtype=float) + float(rag_candidate_limit)
-                    mapped_order = df_candidates["concept_id"].apply(_safe_int).map(order_map)
+                    mapped_order = df_candidates["concept_id"].apply(safe_int).map(order_map)
                     df_candidates["__rag_order"] = base_order
                     mask = mapped_order.notna()
                     df_candidates.loc[mask, "__rag_order"] = mapped_order[mask]
@@ -515,7 +451,7 @@ def run(args: argparse.Namespace) -> None:
                     )
                     rank_map = {cid: idx + 1 for idx, cid in enumerate(adjusted_ids)}
                     score_map = score_lookup
-                    concept_ids_norm = df_candidates["concept_id"].apply(_safe_int)
+                    concept_ids_norm = df_candidates["concept_id"].apply(safe_int)
                     df_candidates["rag_rank"] = concept_ids_norm.map(rank_map)
                     df_candidates["rag_score"] = concept_ids_norm.map(score_map)
                     rag_prompt = rag_result.prompt
@@ -634,7 +570,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Limit to the first N rows from input (0 = all)",
     )
     parser.add_argument("--candidate-topk", type=int, default=DEFAULT_TOPK, help="Candidates before rerank")
-    parser.add_argument("--device", default="auto", help="Device: auto|cuda|mps|cpu (default: auto)")
+    parser.add_argument(
+        "--retrieval-topk",
+        type=int,
+        default=400,
+        help="Number of vector candidates fetched before rerank (>= candidate-topk).",
+    )
+    parser.add_argument(
+        "--no-rerank",
+        action=argparse.BooleanOptionalAction,
+        help="Skip reranking and rely on vector similarity only.",
+    )
+    parser.add_argument("--device", default="cpu", help="Device: auto|cuda|mps|cpu (default: cpu for stability)")
     parser.add_argument("--batch-size", type=int, default=64, help="Embedding batch size")
     parser.add_argument("--where", default=None, help="Optional LanceDB filter expression, e.g. vocabulary_id = 'RxNorm'")
     # Reranker is fixed to BMS in beta; no additional flags
@@ -665,7 +612,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--convert-inn-to-usan",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="Normalize INN/BAN terms in the query to USAN counterparts before retrieval.",
     )
     parser.add_argument(

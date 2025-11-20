@@ -1,7 +1,16 @@
 # thirawat_mapper_beta CLI Guide
 
-
 **T**erminology **H**armonization: **I**ntelligent **R**etrieval with **A**lignment and **W**eighting reranking via **A**utomated **T**ransformers
+
+⚠️⚠️⚠️ **BETA RELEASE** ⚠️⚠️⚠️
+
+**Only support Drug domain concepts in this beta.**
+
+**Use CUDA (`--device cuda`) or CPU (`--device cpu`) for correctness**.
+
+MPS on Apple Silicon can produce unstable embeddings/scores with the current beta models. We will release a fix in the full release.
+
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
 
 ## Prerequisites
 
@@ -27,7 +36,7 @@ source .venv/bin/activate
 uv run python -m thirawat_mapper_beta.index.build --help
 ```
 
-`uv sync` reads the project metadata and installs the required packages (PyTorch, LanceDB, transformers, etc.) against Python 3.11.x. Subsequent `uv run …` invocations will reuse the same environment. Replace paths in the examples below to match your workspace. All text used for indexing and inference is normalized (lower‑cased, whitespace collapsed) for stable matching.
+`uv sync` reads the project metadata and installs the required packages (PyTorch, LanceDB, transformers, etc.) against Python 3.11.x. Subsequent `uv run ...` invocations will reuse the same environment. Replace paths in the examples below to match your workspace. All text used for indexing and inference is normalized (lower-cased, whitespace collapsed) for stable matching.
 
 
 ## 1. Build a LanceDB Index
@@ -49,13 +58,13 @@ uv run python -m thirawat_mapper_beta.index.build \
 
 Key options:
 
-- `--duckdb` – DuckDB file produced by [`sidataplus/athena2duckdb`](https://github.com/sidataplus/athena2duckdb).
-- `--profiles-table` – Table containing `concept_id` and `profile_text` columns.
-- `--concepts-table` – OMOP concept table (defaults to `concept`). The builder always joins to this table and keeps only standard, valid concepts (`standard_concept = 'S' AND invalid_reason IS NULL`).
-- `--domain-id`, `--concept-class-id` – Optional filters; accept comma-separated lists or repeated flags.
-- `--exclude-concept-class-id` – Exclude specific classes (comma-separated or repeat flag). Default empty; recommended exclusions: Clinical Drug Box, Branded Drug Box, Branded Pack Box, Clinical Pack Box, Marketed Product, Quant Branded Box, Quant Clinical Box.
-- `--extra-column` – Carry additional columns from the profiles table into LanceDB (repeat flag).
-- `--out-db` / `--table` – Target LanceDB directory and table name.
+- `--duckdb` - DuckDB file produced by [`sidataplus/athena2duckdb`](https://github.com/sidataplus/athena2duckdb).
+- `--profiles-table` - Table containing `concept_id` and `profile_text` columns.
+- `--concepts-table` - OMOP concept table (defaults to `concept`). The builder always joins to this table and keeps only standard, valid concepts (`standard_concept = 'S' AND invalid_reason IS NULL`).
+- `--domain-id`, `--concept-class-id` - Optional filters; accept comma-separated lists or repeated flags.
+- `--exclude-concept-class-id` - Exclude specific classes (comma-separated or repeat flag). Default empty; recommended exclusions: Clinical Drug Box, Branded Drug Box, Branded Pack Box, Clinical Pack Box, Marketed Product, Quant Branded Box, Quant Clinical Box.
+- `--extra-column` - Carry additional columns from the profiles table into LanceDB (repeat flag).
+- `--out-db` / `--table` - Target LanceDB directory and table name.
 
 The command will:
 
@@ -68,13 +77,16 @@ The command will:
 ## 2. Bulk Inference
 
 ```bash
+export TOKENIZERS_PARALLELISM=false
+
 uv run python -m thirawat_mapper_beta.infer.bulk \
   --db data/lancedb/db \
   --table concepts_drug \
   --input data/usagi.csv \
   --out runs/mapping \
-  --candidate-topk 100 \
-  --device auto
+  --candidate-topk 200 \
+  --n-limit 20 \
+  --device cuda
 ```
 
 Input formats: CSV, TSV, Parquet, or Excel. By default the CLI expects the following columns (override via flags):
@@ -86,29 +98,29 @@ Input formats: CSV, TSV, Parquet, or Excel. By default the CLI expects the follo
 
 Selected flags:
 
-- `--source-name-column`, `--source-code-column` – Override input headers.
-- `--label-column` – Column containing gold concept IDs (optional, default `conceptId`).
-- `--status-column`, `--approved-value` – Configure Usagi approval detection.
-- `--batch-size` – Query embedding batch size (increase for better GPU throughput).
-- `--n-limit` – Limit to the first N rows (smoke runs).
-- `--where` – Optional LanceDB filter, e.g., `vocabulary_id = 'RxNorm' AND concept_class_id != 'Ingredient'` (when those columns exist in the index).
-- `--device` – `auto|cuda|mps|cpu` (default `auto` with safe fallback and fast matmul).
-- `--post-weight` – Weight for simple post‑score blend (default `0.3`).
+- `--source-name-column`, `--source-code-column` - Override input headers.
+- `--label-column` - Column containing gold concept IDs (optional, default `conceptId`).
+- `--status-column`, `--approved-value` - Configure Usagi approval detection.
+- `--batch-size` - Query embedding batch size (increase for better GPU throughput).
+- `--n-limit` - Limit to the first N rows (smoke runs).
+- `--where` - Optional LanceDB filter, e.g., `vocabulary_id = 'RxNorm' AND concept_class_id != 'Ingredient'` (when those columns exist in the index).
+- `--device` - `auto|cuda|mps|cpu` (default `auto` with safe fallback and fast matmul).
+- `--post-weight` - Weight for simple post-score blend (default `0.3`).
 
 Pipeline steps per row:
 
 1. Build query text (`sourceName` with `sourceCode` appended in parentheses when present).
 2. Embed with SapBERT.
 3. Vector search (cosine) against the LanceDB table to gather `--candidate-topk` entries.
-4. Rerank with the THIRAWAT reranker (BMS). Beta is vector‑only; no FTS/BM25/hybrid.
-5. Optionally apply the strength+Jaccard post‑scorer per query (disabled by default via `--post-weight 0.0`).
+4. Rerank with the THIRAWAT reranker. Beta is vector-only; no FTS/BM25/hybrid.
+5. Optionally apply the strength+Jaccard post-scorer per query (disabled by default via `--post-weight 0.0`).
 
 Outputs (written to `--out`):
 
-- `results.csv` – Classic relabel layout (wide, block‑per‑query). Columns: leading `rank` 1..K, then for each query three adjacent columns `[match_rank_or_unmatched, source_concept_name, source_concept_code]` with K rows beneath. Non‑Usagi inputs preserve the original row order; Usagi inputs continue to sort matched rows first so reviewers can focus on confirmed gold IDs.
-- `results_with_input.csv` – Original input row with candidate columns appended.
-- `results_usagi.csv` – Always emitted. Each processed row is coerced into the Usagi schema (using the sample in `data/eval/tmt_to_rxnorm.csv` as ground truth). The top candidate populates `conceptId`, `conceptName`, `domainId`, and `matchScore` when available; otherwise those fields remain blank. Every row is marked `mappingStatus=UNCHECKED`, `statusSetBy=THIRAWAT-mapper`, `mappingType=MAPS_TO` so reviewers can import the file directly into Usagi even when the source sheet was not originally in that format.
-- `metrics.json` – When ground-truth IDs are available (either via `conceptId` or Usagi rows with `mappingStatus == APPROVED`) the file reports Hit@{1,2,5,10,20,50,100}, MRR@100, coverage, and counts.
+- `results.csv` - Classic relabel layout (wide, block-per-query). Columns: leading `rank` 1..K, then for each query three adjacent columns `[match_rank_or_unmatched, source_concept_name, source_concept_code]` with K rows beneath. Non-Usagi inputs preserve the original row order; Usagi inputs continue to sort matched rows first so reviewers can focus on confirmed gold IDs.
+- `results_with_input.csv` - Original input row with candidate columns appended.
+- `results_usagi.csv` - Always emitted. Each processed row is coerced into the Usagi schema (using the sample in `data/eval/tmt_to_rxnorm.csv` as ground truth). The top candidate populates `conceptId`, `conceptName`, `domainId`, and `matchScore` when available; otherwise those fields remain blank. Every row is marked `mappingStatus=UNCHECKED`, `statusSetBy=THIRAWAT-mapper`, `mappingType=MAPS_TO` so reviewers can import the file directly into Usagi even when the source sheet was not originally in that format.
+- `metrics.json` - When ground-truth IDs are available (either via `conceptId` or Usagi rows with `mappingStatus == APPROVED`) the file reports Hit@{1,2,5,10,20,50,100}, MRR@100, coverage, and counts.
 
 ### 2.1 LLM-assisted RAG reranking
 
@@ -116,8 +128,8 @@ Bulk inference can optionally send the top reranked candidates to an LLM for tie
 
 General RAG knobs:
 
-```
---rag-provider {cloudflare,ollama,openrouter,llamacpp}
+```bash
+--rag-provider {ollama,llamacpp,openrouter,cloudflare}
 --rag-model MODEL_ID                # default openai/gpt-oss-20b
 --rag-candidate-limit 50            # number of reranked candidates passed to the LLM
 --rag-profile-char-limit 512        # truncate long profile_text snippets
@@ -130,69 +142,39 @@ General RAG knobs:
 
 > **Tip:** RAG is isolated to `infer.bulk`. The interactive REPL intentionally remains retrieval-only in this beta.
 
-#### Cloudflare Workers AI (remote)
-
-```
-export CLOUDFLARE_ACCOUNT_ID=<ACCOUNT_ID>
-export CLOUDFLARE_API_TOKEN=<API_TOKEN>
-
-uv run python -m thirawat_mapper_beta.infer.bulk \
-  --db data/lancedb/drug_major \
-  --table drug_major \
-  --input data/input/A10.csv \
-  --out runs/a10_cf_rag \
-  --n-limit 100 \
-  --rag-provider cloudflare \
-  --rag-model openai/gpt-oss-20b
-```
-
-Cloudflare-specific flags:
-
-```
---cloudflare-base-url https://api.cloudflare.com/client/v4
---cloudflare-use-responses-api / --no-cloudflare-use-responses-api
---gpt-reasoning-effort {low,medium,high}
---cf-reasoning-summary {auto,concise,detailed}
-```
-
-Set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in your environment before invoking the Cloudflare provider; the CLI reads only from those variables.
-
-- Models under `@cf/openai/*` (for example `@cf/openai/gpt-oss-120b`) use the Workers AI Responses API, so leave `--cloudflare-use-responses-api` enabled to send the prompt as an `input` payload.
-- Meta's `@cf/meta/llama-4-*` family is served via the `/ai/run/<model>` endpoint—pass `--no-cloudflare-use-responses-api` when targeting those models so the CLI emits the `messages` payload the endpoint expects.
-
 #### Ollama (local GGUF/chat server)
 
-```
+```bash
 uv run python -m thirawat_mapper_beta.infer.bulk \
-  --db data/lancedb/drug_major \
-  --table drug_major \
-  --input data/input/A10.csv \
-  --out runs/a10_ollama_rag \
+  --db data/lancedb/db \
+  --table concepts_drug \
+  --input data/input/usagi.csv \
+  --out runs/ollama_rag \
   --n-limit 100 \
   --rag-provider ollama \
   --ollama-base-url http://localhost:11434 \
-  --ollama-model gpt-oss:20b
+    --ollama-model "gpt-oss:20b"
 ```
 
 Ollama-specific flags:
 
-```
+```bash
 --ollama-base-url URL          # default http://localhost:11434
 --ollama-model MODEL_TAG       # defaults to --rag-model value
 --ollama-timeout 120           # seconds
---ollama-keep-alive 5m         # optional keep-alive hint sent to server
+    --ollama-keep-alive "5m"       # optional keep-alive hint sent to server
 ```
 
 #### llama.cpp server (local HTTP API)
 
-`--rag-provider llamacpp` expects the [llama.cpp `llama-server`](https://github.com/ggerganov/llama.cpp/tree/master/examples/server) process to be running ahead of time (default `http://127.0.0.1:8080`). Launch the server separately with your desired context and batching flags (for example: `llama-server -hf ggml-org/gpt-oss-20b-GGUF --ctx-size 0 --jinja -ub 2048 -b 2048 -fa on`). Point the CLI at that HTTP endpoint, not at GGUF files directly:
+Use `--rag-provider llamacpp` only when a [llama.cpp `llama-server`](https://github.com/ggerganov/llama.cpp/tree/master/examples/server) process is already running (default `http://127.0.0.1:8080`). Launch the server separately with your desired context and batching flags (for example: `llama-server -hf ggml-org/gpt-oss-20b-GGUF --ctx-size 0 --jinja -ub 2048 -b 2048 -fa on`). Point the CLI at that HTTP endpoint, not at GGUF files directly:
 
-```
+```bash
 uv run python -m thirawat_mapper_beta.infer.bulk \
-  --db data/lancedb/drug_major \
-  --table drug_major \
-  --input data/input/A10.csv \
-  --out runs/a10_llamacpp_rag \
+  --db data/lancedb/db \
+  --table concepts_drug \
+  --input data/input/usagi.csv \
+  --out runs/llamacpp_rag \
   --rag-provider llamacpp \
   --llamacpp-base-url http://127.0.0.1:8080 \
   --rag-model ggml-org/gpt-oss-20b-GGUF
@@ -200,7 +182,7 @@ uv run python -m thirawat_mapper_beta.infer.bulk \
 
 llama.cpp flags:
 
-```
+```bash
 --llamacpp-base-url URL          # default http://127.0.0.1:8080
 --llamacpp-timeout 120           # HTTP timeout in seconds
 --llamacpp-chat-format FORMAT    # e.g., qwen, llama
@@ -215,26 +197,50 @@ For all providers, the CLI logs each prompt/response pair and the parsed candida
 
 #### OpenRouter (hosted multi-model API)
 
-```
+```bash
 export OPENROUTER_API_KEY=<YOUR_KEY>
 
 uv run python -m thirawat_mapper_beta.infer.bulk \
-  --db data/lancedb/drug_major \
-  --table drug_major \
-  --input data/input/A10.csv \
-  --out runs/a10_openrouter_rag \
+  --db data/lancedb/db \
+  --table concepts_drug \
+  --input data/input/usagi.csv \
+  --out runs/openrouter_rag \
   --rag-provider openrouter \
   --rag-model openrouter/polaris-alpha
 ```
 
-Flags:
+Set `OPENROUTER_API_KEY` in your environment; the CLI will refuse to call OpenRouter without it.
 
+#### Cloudflare Workers AI (remote)
+
+```bash
+```bash
+export CLOUDFLARE_ACCOUNT_ID=<ACCOUNT_ID>
+export CLOUDFLARE_API_TOKEN=<API_TOKEN>
+
+uv run python -m thirawat_mapper_beta.infer.bulk \
+  --db data/lancedb/db \
+  --table concepts_drug \
+  --input data/input/usagi.csv \
+  --out runs/cf_rag \
+  --n-limit 100 \
+  --rag-provider cloudflare \
+  --rag-model openai/gpt-oss-20b
 ```
---openrouter-base-url https://openrouter.ai/api/v1   # override if self-hosting a proxy
+
+Cloudflare-specific flags:
+
+```bash
+--cloudflare-base-url https://api.cloudflare.com/client/v4
+--cloudflare-use-responses-api / --no-cloudflare-use-responses-api
+--gpt-reasoning-effort {low,medium,high}
+--cf-reasoning-summary {auto,concise,detailed}
 ```
 
-Set `OPENROUTER_API_KEY` in your environment; the CLI will refuse to call OpenRouter without it. Models follow the OpenRouter catalog (e.g., `openrouter/google/gemini-flash-1.5`, `openrouter/meta-llama/llama-3.1-70b-instruct`).
+Set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in your environment before invoking the Cloudflare provider; the CLI reads only from those variables.
 
+- Models under `@cf/openai/*` (for example `@cf/openai/gpt-oss-120b`) use the Workers AI Responses API, so leave `--cloudflare-use-responses-api` enabled to send the prompt as an `input` payload.
+- Meta's `@cf/meta/llama-4-*` family is served via the `/ai/run/<model>` endpoint-pass `--no-cloudflare-use-responses-api` when targeting those models so the CLI emits the `messages` payload the endpoint expects.
 
 ## 3. Interactive Query (REPL)
 
@@ -242,7 +248,7 @@ Set `OPENROUTER_API_KEY` in your environment; the CLI will refuse to call OpenRo
 uv run python -m thirawat_mapper_beta.infer.query \
   --db data/lancedb/db \
   --table concepts_drug \
-  --device auto
+  --device cpu
 ```
 
 Type a query and press Enter to see the post-scored top results:
@@ -263,9 +269,8 @@ Commands:
 
 ## Notes & Requirements
 
-- Vector‑only retrieval + BMS reranking (no FTS/BM25/hybrid in beta).
+- Vector-only retrieval + reranking (no FTS/BM25/hybrid in beta).
 - Text is normalized (lowercase + collapsed whitespace) for indexing and inference.
-- PyTorch device: if `--device auto`, the runner prefers CUDA → MPS → CPU and enables fast matmul/TF32 where safe. Use `--batch-size` to increase GPU throughput.
 - The reranker model `na399/THIRAWAT-reranker-beta` is a gated model on Hugging Face. You must request access on the model page (web) and login via the CLI before running.
-- LanceDB tables must expose a float32 fixed‑size vector column (named `vector` when built with this CLI).
+- LanceDB tables must expose a float32 fixed-size vector column (named `vector` when built with this CLI).
 - Index build keeps only standard, valid OMOP concepts (`standard_concept='S' AND invalid_reason IS NULL`).

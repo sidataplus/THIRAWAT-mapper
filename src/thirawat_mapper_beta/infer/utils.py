@@ -145,6 +145,7 @@ def enrich_with_post_scores(
     post_minmax: bool,
     post_weight: float,
     prefer_brand: bool = True,
+    rank_output: bool = True,
 ) -> pd.DataFrame:
     """Attach post-scoring columns and return a ranked DataFrame.
 
@@ -182,6 +183,8 @@ def enrich_with_post_scores(
     w = float(post_weight)
     df["final_score"] = (1.0 - w) * relevance.fillna(0.0) + w * df["post_score"].astype(float)
 
+    if not rank_output:
+        return df
     return rank_candidates(df, prefer_brand=prefer_brand, drop_private_brand_col=True)
 
 
@@ -210,3 +213,19 @@ def sanitize_query_text(
 
 
 __all__.append("sanitize_query_text")
+
+
+_STRENGTH_UNITS_PATTERN = re.compile(
+    r"(?<=\d)(?=(mg|mcg|g|ml|l|iu|meq|unit|units|unt)\b)", re.IGNORECASE
+)
+
+
+def normalize_strength_spacing(text: str) -> str:
+    """Insert a space between magnitudes and common strength units when missing."""
+
+    if not text:
+        return text
+    return _STRENGTH_UNITS_PATTERN.sub(" ", text)
+
+
+__all__.append("normalize_strength_spacing")
