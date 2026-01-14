@@ -72,12 +72,13 @@ Key options:
 - `--domain-id`, `--concept-class-id` - Optional filters; accept comma-separated lists or repeated flags.
 - `--exclude-concept-class-id` - Exclude specific classes (comma-separated or repeat flag). Default empty; recommended exclusions: Clinical Drug Box, Branded Drug Box, Branded Pack Box, Clinical Pack Box, Marketed Product, Quant Branded Box, Quant Clinical Box.
 - `--extra-column` - Carry additional columns from the profiles table into LanceDB (repeat flag).
+- `--model-id`, `--pooling`, `--max-length` - Encoder controls for building the index vectors (also written into the index manifest for inference defaults).
 - `--out-db` / `--table` - Target LanceDB directory and table name.
 
 The command will:
 
 1. Load profiles (and apply filters if provided).
-2. Normalize `profile_text` and embed with SapBERT CLS vectors (via `transformers`).
+2. Normalize `profile_text` and embed with SapBERT vectors (via `transformers`; pooling configurable).
 3. Write a LanceDB table where `vector` is a `FixedSizeList<float32>[768]` column.
 4. Emit a `<table>_manifest.json` manifest describing the build (model id, filters, counts).
 
@@ -97,6 +98,8 @@ uv run python -m thirawat_mapper_beta.infer.bulk \
   --device cuda
 ```
 
+Add `--reranker-id` to point at a different reranker checkpoint. The flag accepts either a Hugging Face model ID or a local path, e.g. `--reranker-id models/nde_biolord`.
+
 Input formats: CSV, TSV, Parquet, or Excel. By default the CLI expects the following columns (override via flags):
 
 - `sourceName` (required)
@@ -113,7 +116,14 @@ Selected flags:
 - `--n-limit` - Limit to the first N rows (smoke runs).
 - `--where` - Optional LanceDB filter, e.g., `vocabulary_id = 'RxNorm' AND concept_class_id != 'Ingredient'` (when those columns exist in the index).
 - `--device` - `auto|cuda|mps|cpu` (default `auto` with safe fallback and fast matmul).
-- `--post-weight` - Weight for simple post-score blend (default `0.3`).
+- `--encoder-model-id`, `--encoder-pooling`, `--encoder-max-length` - Override the query encoder used for retrieval (defaults to the index manifest when present).
+- `--post-mode` - Post-score behavior: `blend|tiebreak|lex` (default `tiebreak`).
+- `--post-weight` - Blend weight (only when `--post-mode blend`, default `0.05`).
+- `--tiebreak-eps`, `--tiebreak-topn` - Controls near-tie grouping for `--post-mode tiebreak`.
+- `--brand-strict` - For bracketed brand queries, drop brand-mismatched candidates when possible.
+- `--inn2usan/--no-inn2usan` - Normalize INN/BAN drug names to USAN during inference (default enabled).
+- `--atc-scope` - Boost candidates matching per-row `atc_ids`/`atc_codes` (requires `--vocab` or a DuckDB path in the index manifest).
+- `--reranker-id` - Override the default reranker (`na399/THIRAWAT-reranker-beta`) with another HF model ID or a local directory/filename. Relative paths are resolved to absolute paths so you can pass `models/nde_biolord`.
 
 Pipeline steps per row:
 
@@ -121,7 +131,7 @@ Pipeline steps per row:
 2. Embed with SapBERT.
 3. Vector search (cosine) against the LanceDB table to gather `--candidate-topk` entries.
 4. Rerank with the THIRAWAT reranker. Beta is vector-only; no FTS/BM25/hybrid.
-5. Optionally apply the strength+Jaccard post-scorer per query (disabled by default via `--post-weight 0.0`).
+5. Apply post-scoring per `--post-mode` (default `tiebreak`: only reorders within near-ties of the ML score). Disable post-scoring via `--post-mode blend --post-weight 0.0`.
 
 Outputs (written to `--out`):
 
@@ -133,6 +143,8 @@ Outputs (written to `--out`):
 ### 2.1 LLM-assisted RAG reranking
 
 Bulk inference can optionally send the top reranked candidates to an LLM for tie-breaking or abstention logic. Enable this flow with `--rag-provider` and supply provider-specific flags. The CLI saves every prompt/response pair to `rag_prompts.md` under the chosen `--out` directory so you can audit exactly what was sent.
+
+LLM output must be structured JSON with a `concept_ids` array, e.g. `{"concept_ids":[123,456,789]}`. If a provider returns invalid JSON for a query, that query falls back to the non-LLM ranking and logs an error.
 
 General RAG knobs:
 
@@ -256,7 +268,8 @@ Set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in your environment befor
 uv run python -m thirawat_mapper_beta.infer.query \
   --db data/lancedb/db \
   --table concepts_drug \
-  --device cpu
+  --device cpu \
+  --reranker-id models/nde_biolord  # optional override; defaults to na399/THIRAWAT-reranker-beta
 ```
 
 Type a query and press Enter to see the post-scored top results:
@@ -273,12 +286,13 @@ Commands:
 
 - Type `:q`, `:quit`, or `:exit` to leave.
 - Use `--candidate-topk` to change the candidate pool and `--show-topk` to limit display rows.
+- `--reranker-id` works here too if you want to test a local or alternative reranker in the REPL.
 
 
 ## Notes & Requirements
 
 - Vector-only retrieval + reranking (no FTS/BM25/hybrid in beta).
 - Text is normalized (lowercase + collapsed whitespace) for indexing and inference.
-- The reranker model `na399/THIRAWAT-reranker-beta` is a gated model on Hugging Face. You must request access on the model page (web) and login via the CLI before running.
+- The reranker model `na399/THIRAWAT-reranker-beta` is a gated model on Hugging Face. You must request access on the model page (web) and login via the CLI before running; you can also point `--reranker-id` at a local ColBERT-style checkpoint (e.g., `models/nde_biolord`) without re-authenticating.
 - LanceDB tables must expose a float32 fixed-size vector column (named `vector` when built with this CLI).
 - Index build keeps only standard, valid OMOP concepts (`standard_concept='S' AND invalid_reason IS NULL`).

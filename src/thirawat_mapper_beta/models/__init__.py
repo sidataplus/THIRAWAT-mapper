@@ -16,7 +16,7 @@ from .rag_llm import (
 )
 from .rag_pipeline import RAGPipeline, RagRanking
 from .rag_prompt import RAGPromptBuilder, RagCandidate, TemplatePromptBuilder, to_candidates
-from .reranker import ThirawatReranker
+from .reranker import DEFAULT_RERANKER_ID, ThirawatReranker
 
 __all__ = [
     "BaseLLMClient",
@@ -37,5 +37,6 @@ __all__ = [
     "SapBERTEmbedder",
     "TemplatePromptBuilder",
     "ThirawatReranker",
+    "DEFAULT_RERANKER_ID",
     "to_candidates",
 ]

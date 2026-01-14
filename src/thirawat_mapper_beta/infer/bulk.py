@@ -14,6 +14,7 @@ from tqdm.auto import tqdm
 
 from thirawat_mapper_beta.io import coerce_usagi_row, export_relabel_csv, is_usagi_format, validate_usagi_frame
 from thirawat_mapper_beta.models import (
+    DEFAULT_RERANKER_ID,
     CloudflareConfig,
     CloudflareLLMClient,
     LlamaCppConfig,
@@ -31,14 +32,16 @@ from thirawat_mapper_beta.models import (
     ThirawatReranker,
     to_candidates,
 )
-from .conversion import convert_inn_ban_to_usan
-from .shared_filters import ConceptClassResolver, safe_int, to_exclusion_set
+from thirawat_mapper_beta.models.embedder import DEFAULT_MODEL_ID
+from .conversion import DEFAULT_INN_TO_USAN, MAPPER_EXTRA_INN_TO_USAN, convert_inn_ban_to_usan
+from .shared_filters import AtcScopeResolver, ConceptClassResolver, safe_int, to_exclusion_set
 from .utils import (
     configure_torch_for_infer,
     minmax_normalize,
     resolve_device,
     rank_candidates,
     enrich_with_post_scores,
+    should_apply_post,
     sanitize_query_text,
     normalize_strength_spacing,
 )
@@ -47,6 +50,34 @@ from thirawat_mapper_beta.utils import connect_table, normalize_text_value
 
 DEFAULT_TOPK = 100
 EVAL_K = (1, 2, 5, 10, 20, 50, 100)
+
+
+def _load_manifest(db_path: str, table: str) -> Optional[dict]:
+    manifest_path = Path(db_path) / f"{table}_manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _resolve_encoder_config(args: argparse.Namespace, manifest: Optional[dict]) -> dict:
+    manifest = manifest or {}
+    model_id = getattr(args, "encoder_model_id", None) or manifest.get("model_id") or DEFAULT_MODEL_ID
+    pooling = getattr(args, "encoder_pooling", None) or manifest.get("pooling") or "cls"
+    max_length = getattr(args, "encoder_max_length", None)
+    if max_length is None:
+        max_length = manifest.get("max_length") or 128
+    trust_remote_code = getattr(args, "encoder_trust_remote_code", None)
+    if trust_remote_code is None:
+        trust_remote_code = bool(manifest.get("trust_remote_code", False))
+    return {
+        "model_id": str(model_id),
+        "pooling": str(pooling),
+        "max_length": int(max_length),
+        "trust_remote_code": bool(trust_remote_code),
+    }
 
 
 def _load_input(path: Path) -> pd.DataFrame:
@@ -69,6 +100,12 @@ def _prepare_queries(df: pd.DataFrame, name_col: str, code_col: str | None) -> L
         if not name:
             queries.append("")
             continue
+        if code_col:
+            code_val = row.get(code_col, None)
+            code = str(code_val).strip() if code_val is not None and pd.notna(code_val) else ""
+            if code:
+                queries.append(f"{name} ({code})")
+                continue
         queries.append(name)
     return queries
 
@@ -241,8 +278,19 @@ def _apply_brand_penalty(
     return ordered_concept_ids
 
 
+def _apply_atc_scope(df_candidates: pd.DataFrame, allowlist: set[int]) -> pd.DataFrame:
+    """Stable-rerank candidates by whether they match the ATC allowlist."""
+
+    if df_candidates is None or df_candidates.empty or not allowlist:
+        return df_candidates
+    df = df_candidates.copy()
+    df["atc_match"] = df["concept_id"].apply(safe_int).isin(allowlist)
+    return df.sort_values("atc_match", ascending=False, kind="mergesort").reset_index(drop=True)
+
+
 def run(args: argparse.Namespace) -> None:
     table, vector_column = connect_table(args.db, args.table)
+    manifest = _load_manifest(args.db, args.table)
     df = _load_input(Path(args.input))
     input_is_usagi = False
     if not df.empty and is_usagi_format(df.columns):
@@ -269,17 +317,29 @@ def run(args: argparse.Namespace) -> None:
         ]
     else:
         queries_sanitized = queries
-    if getattr(args, "convert_inn_to_usan", False):
-        queries_sanitized = [convert_inn_ban_to_usan(q) for q in queries_sanitized]
+    if getattr(args, "inn2usan", False):
+        mapping = None
+        if getattr(args, "inn2usan_extra", False):
+            mapping = {**DEFAULT_INN_TO_USAN, **MAPPER_EXTRA_INN_TO_USAN}
+        queries_sanitized = [convert_inn_ban_to_usan(q, mapping=mapping) for q in queries_sanitized]
     queries_sanitized = [normalize_strength_spacing(q) for q in queries_sanitized]
     queries_norm = [normalize_text_value(q) for q in queries_sanitized]
 
     device = resolve_device(args.device)
     configure_torch_for_infer(device)
-    embedder = SapBERTEmbedder(device=device, batch_size=args.batch_size)
+    encoder_cfg = _resolve_encoder_config(args, manifest)
+    embedder = SapBERTEmbedder(
+        model_id=encoder_cfg["model_id"],
+        device=device,
+        batch_size=args.batch_size,
+        max_length=encoder_cfg["max_length"],
+        pooling=encoder_cfg["pooling"],
+        trust_remote_code=encoder_cfg["trust_remote_code"],
+    )
     vectors = embedder.encode(queries_norm)
 
-    reranker = ThirawatReranker(device=device, return_score="all")
+    reranker_id = args.reranker_id or DEFAULT_RERANKER_ID
+    reranker = ThirawatReranker(model_id=reranker_id, device=device, return_score="all")
 
     rag_pipeline: Optional[RAGPipeline] = None
     rag_candidate_limit = 0
@@ -296,18 +356,11 @@ def run(args: argparse.Namespace) -> None:
     error_logs: List[Dict[str, object]] = []
 
     status_series = df[args.status_column] if args.status_column in df.columns else None
-    manifest_path = Path(args.db) / f"{args.table}_manifest.json"
     duckdb_path: Optional[str] = None
     concepts_table: Optional[str] = None
-    if manifest_path.exists():
-        try:
-            manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
-            duckdb_path = manifest.get("duckdb")
-            concepts_table = manifest.get("concepts_table")
-        except Exception as exc:
-            print(f"[warn] Failed to read manifest metadata: {exc}")
-    else:
-        manifest = None
+    if manifest:
+        duckdb_path = manifest.get("duckdb")
+        concepts_table = manifest.get("concepts_table")
 
     exclude_concept_class_ids = to_exclusion_set(getattr(args, "exclude_concept_class_id", None))
     concept_class_resolver: Optional[ConceptClassResolver] = None
@@ -316,6 +369,17 @@ def run(args: argparse.Namespace) -> None:
             concept_class_resolver = ConceptClassResolver(Path(duckdb_path), str(concepts_table))
         else:
             print("[warn] Concept class exclusions unavailable (missing duckdb manifest info).")
+
+    allowlist_by_row: dict[int, set[int]] = {}
+    if getattr(args, "atc_scope", False):
+        vocab_path = getattr(args, "vocab", None) or duckdb_path
+        if not vocab_path:
+            raise SystemExit("--atc-scope requires --vocab or an index manifest with a duckdb path.")
+        if "atc_ids" not in df.columns and "atc_codes" not in df.columns:
+            print("[warn] ATC scoping requested but input has no atc_ids/atc_codes columns; no ATC filters applied.")
+        else:
+            resolver = AtcScopeResolver(Path(str(vocab_path)))
+            allowlist_by_row = resolver.build_allowlist(df, allowlist_max_ids=int(getattr(args, "allowlist_max_ids", 1000)))
 
     failures = 0
     for idx in tqdm(range(len(queries)), desc="Infer", unit="q"):
@@ -401,17 +465,31 @@ def run(args: argparse.Namespace) -> None:
                 ].reset_index(drop=True)
 
         if not df_candidates.empty:
-            df_candidates = enrich_with_post_scores(
-                df_candidates,
-                query_text_norm,
-                post_strength_weight=float(args.post_strength_weight),
-                post_jaccard_weight=float(args.post_jaccard_weight),
-                post_brand_penalty=float(args.post_brand_penalty),
-                post_minmax=bool(args.post_minmax),
-                post_weight=float(args.post_weight),
-                prefer_brand=True,
-                rank_output=False,
-            )
+            if should_apply_post(str(args.post_mode), float(args.post_weight)):
+                df_candidates = enrich_with_post_scores(
+                    df_candidates,
+                    query_text_norm,
+                    post_strength_weight=float(args.post_strength_weight),
+                    post_jaccard_weight=float(args.post_jaccard_weight),
+                    post_brand_penalty=float(args.post_brand_penalty),
+                    post_minmax=bool(args.post_minmax),
+                    post_weight=float(args.post_weight),
+                    prefer_brand=True,
+                    post_mode=str(args.post_mode),
+                    tiebreak_eps=float(args.tiebreak_eps),
+                    tiebreak_topn=int(args.tiebreak_topn),
+                    brand_strict=bool(args.brand_strict),
+                )
+            else:
+                base_col = "_relevance_score" if "_relevance_score" in df_candidates.columns else "score"
+                if base_col in df_candidates.columns:
+                    df_candidates = df_candidates.sort_values(base_col, ascending=False, kind="mergesort").reset_index(drop=True)
+                    df_candidates["final_score"] = pd.to_numeric(df_candidates[base_col], errors="coerce").fillna(0.0)
+                else:
+                    df_candidates["final_score"] = 0.0
+            allowlist = allowlist_by_row.get(idx)
+            if allowlist:
+                df_candidates = _apply_atc_scope(df_candidates, allowlist)
         else:
             df_candidates = pd.DataFrame(columns=["concept_id", "concept_name", "profile_text", "final_score"])
 
@@ -582,11 +660,63 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Skip reranking and rely on vector similarity only.",
     )
     parser.add_argument("--device", default="cpu", help="Device: auto|cuda|mps|cpu (default: cpu for stability)")
+    parser.add_argument(
+        "--reranker-id",
+        default=None,
+        help="Model identifier or path for reranker (default: na399/THIRAWAT-reranker-beta; supports local directories)",
+    )
     parser.add_argument("--batch-size", type=int, default=64, help="Embedding batch size")
+    parser.add_argument(
+        "--encoder-model-id",
+        default=None,
+        help="Encoder model id for query embeddings (default: from index manifest or SapBERT).",
+    )
+    parser.add_argument(
+        "--encoder-pooling",
+        choices=["cls", "mean"],
+        default=None,
+        help="Encoder pooling for query embeddings (default: from index manifest).",
+    )
+    parser.add_argument(
+        "--encoder-max-length",
+        type=int,
+        default=None,
+        help="Encoder max token length for query embeddings (default: from index manifest).",
+    )
+    parser.add_argument(
+        "--encoder-trust-remote-code",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="trust_remote_code for encoder model loading (default: from index manifest).",
+    )
     parser.add_argument("--where", default=None, help="Optional LanceDB filter expression, e.g. vocabulary_id = 'RxNorm'")
-    # Reranker is fixed to BMS in beta; no additional flags
+    parser.add_argument(
+        "--atc-scope",
+        action="store_true",
+        help="Boost candidates that match provided ATC ids/codes (requires atc_ids/atc_codes columns in input + a DuckDB vocab).",
+    )
+    parser.add_argument(
+        "--vocab",
+        default=None,
+        help="DuckDB vocabulary file (used for ATC scoping; defaults to index manifest duckdb when available).",
+    )
+    parser.add_argument(
+        "--allowlist-max-ids",
+        type=int,
+        default=1000,
+        help="Safety cap for per-row ATC allowlists (skip scoping if exceeded).",
+    )
     # Post-scorer controls
     parser.add_argument("--post-weight", type=float, default=0.05, help="Weight for simple post-score in final blend (0.0 = ML only)")
+    parser.add_argument(
+        "--post-mode",
+        choices=["blend", "tiebreak", "lex"],
+        default="tiebreak",
+        help="Post-score behavior: blend, tiebreak within near-ties, or lexicographic sort",
+    )
+    parser.add_argument("--tiebreak-eps", type=float, default=0.01, help="Score gap threshold for tie groups")
+    parser.add_argument("--tiebreak-topn", type=int, default=50, help="Only tiebreak within the top-N candidates")
+    parser.add_argument("--brand-strict", action="store_true", help="Drop brand-mismatched candidates for bracketed brand queries when possible")
     parser.add_argument("--post-strength-weight", type=float, default=0.6, help="Weight for strength feature within simple score")
     parser.add_argument("--post-jaccard-weight", type=float, default=0.4, help="Weight for jaccard feature within simple score")
     parser.add_argument(
@@ -610,10 +740,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Characters to remove from query before retrieval/rerank (e.g., '()[]{}').",
     )
     parser.add_argument(
+        "--inn2usan",
         "--convert-inn-to-usan",
+        dest="inn2usan",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Normalize INN/BAN terms in the query to USAN counterparts before retrieval.",
+        help="Normalize INN/BAN drug names to USAN before retrieval (default: enabled).",
+    )
+    parser.add_argument(
+        "--inn2usan-extra",
+        action="store_true",
+        help="Enable mapper-only extra INN→USAN aliases in addition to trainer parity mapping (default: off).",
     )
     parser.add_argument(
         "--label-column",

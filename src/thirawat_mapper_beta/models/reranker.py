@@ -6,7 +6,9 @@ the LanceDB reranker protocol. Vector-only in this beta.
 
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from os import PathLike
+from pathlib import Path
+from typing import List, Optional
 
 import numpy as np
 import pyarrow as pa
@@ -17,11 +19,30 @@ from .bms_pooling import bms_scores
 DEFAULT_RERANKER_ID = "na399/THIRAWAT-reranker-beta"
 
 
+def _resolve_model_id(model_id: str | PathLike[str]) -> str:
+    """Return an absolute path when a local directory/file is provided.
+
+    Keeping this normalization separate lets the CLI accept values such as
+    "models/nde_biolord" or "~/models/foo" while still supporting remote
+    identifiers that need to pass through untouched.
+    """
+
+    try:
+        path = Path(model_id).expanduser()
+    except TypeError:
+        return str(model_id)
+
+    if path.exists():
+        return str(path.resolve())
+    return str(model_id)
+
+
 class _ThirawatPylateScorer:
-    def __init__(self, model_id: str, device: Optional[str], max_query_len: int = 128, max_doc_len: int = 128):
+    def __init__(self, model_id: str | PathLike[str], device: Optional[str], max_query_len: int = 128, max_doc_len: int = 128):
         from pylate.models import ColBERT  # type: ignore
+        model_name_or_path = _resolve_model_id(model_id)
         self.model = ColBERT(
-            model_name_or_path=model_id,
+            model_name_or_path=model_name_or_path,
             device=device or None,
             query_length=int(max_query_len),
             document_length=int(max_doc_len),
@@ -56,13 +77,13 @@ class _ThirawatPylateScorer:
 class ThirawatReranker:
     def __init__(
         self,
-        model_id: str = DEFAULT_RERANKER_ID,
+        model_id: str | PathLike[str] = DEFAULT_RERANKER_ID,
         *,
         device: str | None = None,
         return_score: str = "all",
         column: str = "profile_text",
     ) -> None:
-        self.model_id = model_id
+        self.model_id = _resolve_model_id(model_id)
         self.device = device
         self.return_score = return_score
         # LanceDB inspects `.score` to decide output columns

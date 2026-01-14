@@ -14,6 +14,7 @@ import pyarrow as pa
 
 from thirawat_mapper_beta.io import read_concept_profiles
 from thirawat_mapper_beta.models import SapBERTEmbedder
+from thirawat_mapper_beta.models.embedder import DEFAULT_MODEL_ID
 from thirawat_mapper_beta.utils import normalize_text_value
 
 EXCLUDED_CONCEPT_CLASSES = (
@@ -294,7 +295,14 @@ def build_index(args: argparse.Namespace) -> None:
     # Normalize profile_text for indexing
     df["profile_text"] = df["profile_text"].astype("string").apply(normalize_text_value)
 
-    embedder = SapBERTEmbedder(device=args.device, batch_size=args.batch_size)
+    embedder = SapBERTEmbedder(
+        model_id=str(args.model_id or DEFAULT_MODEL_ID),
+        device=args.device,
+        batch_size=args.batch_size,
+        max_length=int(args.max_length),
+        pooling=str(args.pooling),
+        trust_remote_code=bool(args.trust_remote_code),
+    )
     vectors = embedder.encode(df["profile_text"].tolist(), progress=True)
 
     table_data = {
@@ -330,6 +338,9 @@ def build_index(args: argparse.Namespace) -> None:
         "vector_dim": vectors.shape[1],
         "count": len(df),
         "model_id": embedder.model_id,
+        "pooling": embedder.pooling,
+        "max_length": embedder.max_length,
+        "trust_remote_code": embedder.trust_remote_code,
     }
     manifest_path = db_path / f"{args.table}_manifest.json"
     with manifest_path.open("w", encoding="utf-8") as fh:
@@ -385,6 +396,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--batch-size", type=int, default=256, help="Embedding batch size")
     parser.add_argument("--device", default=None, help="torch device, e.g. cuda or cpu")
+    parser.add_argument("--model-id", default=DEFAULT_MODEL_ID, help="Hugging Face model id for the encoder")
+    parser.add_argument(
+        "--pooling",
+        choices=["cls", "mean"],
+        default="cls",
+        help="Pooling strategy for encoder outputs (default: cls for SapBERT)",
+    )
+    parser.add_argument("--max-length", type=int, default=128, help="Maximum token length for encoder inputs")
+    parser.add_argument("--trust-remote-code", action="store_true", help="Enable trust_remote_code for HF model loading")
     return parser.parse_args(argv)
 
 

@@ -48,5 +48,6 @@ def test_openrouter_client_builds_request(monkeypatch):
     assert all(key.lower() not in {"http-referer", "referer", "x-title"} for key in captured["headers"].keys())
     assert captured["payload"]["model"] == cfg.model_name
     assert captured["payload"]["messages"][0]["role"] == "system"
-    assert "temperature" not in captured["payload"]
+    assert captured["payload"]["temperature"] == 0.0
     assert "top_p" not in captured["payload"]
+    assert captured["payload"]["response_format"]["type"] == "json_schema"

@@ -9,21 +9,51 @@ from typing import Sequence
 
 import pandas as pd
 
-from thirawat_mapper_beta.models import SapBERTEmbedder, ThirawatReranker
+from thirawat_mapper_beta.models import DEFAULT_RERANKER_ID, SapBERTEmbedder, ThirawatReranker
+from thirawat_mapper_beta.models.embedder import DEFAULT_MODEL_ID
 from thirawat_mapper_beta.scoring import post_scorer as ps  # for --debug internals
 from thirawat_mapper_beta.utils import connect_table, normalize_text_value
-from .conversion import convert_inn_ban_to_usan
+from .conversion import DEFAULT_INN_TO_USAN, MAPPER_EXTRA_INN_TO_USAN, convert_inn_ban_to_usan
 from .shared_filters import ConceptClassResolver, safe_int, to_exclusion_set
 from .utils import (
     configure_torch_for_infer,
     resolve_device,
     enrich_with_post_scores,
+    should_apply_post,
     sanitize_query_text,
     normalize_strength_spacing,
 )
 
 
 DEFAULT_TOPK = 100
+
+
+def _load_manifest(db_path: str, table: str) -> dict | None:
+    manifest_path = Path(db_path) / f"{table}_manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _resolve_encoder_config(args: argparse.Namespace, manifest: dict | None) -> dict:
+    manifest = manifest or {}
+    model_id = getattr(args, "encoder_model_id", None) or manifest.get("model_id") or DEFAULT_MODEL_ID
+    pooling = getattr(args, "encoder_pooling", None) or manifest.get("pooling") or "cls"
+    max_length = getattr(args, "encoder_max_length", None)
+    if max_length is None:
+        max_length = manifest.get("max_length") or 128
+    trust_remote_code = getattr(args, "encoder_trust_remote_code", None)
+    if trust_remote_code is None:
+        trust_remote_code = bool(manifest.get("trust_remote_code", False))
+    return {
+        "model_id": str(model_id),
+        "pooling": str(pooling),
+        "max_length": int(max_length),
+        "trust_remote_code": bool(trust_remote_code),
+    }
 
 
 def _prepare_query_text(text: str, args: argparse.Namespace) -> str:
@@ -34,8 +64,11 @@ def _prepare_query_text(text: str, args: argparse.Namespace) -> str:
             strip_non_latin=bool(args.strip_non_latin),
             strip_chars=str(args.strip_chars or ""),
         )
-    if args.convert_inn_to_usan:
-        value = convert_inn_ban_to_usan(value)
+    if getattr(args, "inn2usan", False):
+        mapping = None
+        if getattr(args, "inn2usan_extra", False):
+            mapping = {**DEFAULT_INN_TO_USAN, **MAPPER_EXTRA_INN_TO_USAN}
+        value = convert_inn_ban_to_usan(value, mapping=mapping)
     value = normalize_strength_spacing(value)
     return value
 
@@ -60,21 +93,26 @@ def _format_row(row: pd.Series) -> str:
 
 def run(args: argparse.Namespace) -> None:
     table, vector_column = connect_table(args.db, args.table)
+    manifest = _load_manifest(args.db, args.table)
     device = resolve_device(args.device)
     configure_torch_for_infer(device)
-    embedder = SapBERTEmbedder(device=device, batch_size=args.batch_size)
-    reranker = ThirawatReranker(device=device, return_score="all")
+    encoder_cfg = _resolve_encoder_config(args, manifest)
+    embedder = SapBERTEmbedder(
+        model_id=encoder_cfg["model_id"],
+        device=device,
+        batch_size=args.batch_size,
+        max_length=encoder_cfg["max_length"],
+        pooling=encoder_cfg["pooling"],
+        trust_remote_code=encoder_cfg["trust_remote_code"],
+    )
+    reranker_id = args.reranker_id or DEFAULT_RERANKER_ID
+    reranker = ThirawatReranker(model_id=reranker_id, device=device, return_score="all")
 
-    manifest_path = Path(args.db) / f"{args.table}_manifest.json"
     duckdb_path: str | None = None
     concepts_table: str | None = None
-    if manifest_path.exists():
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            duckdb_path = manifest.get("duckdb")
-            concepts_table = manifest.get("concepts_table")
-        except Exception as exc:  # pragma: no cover - defensive
-            print(f"[warn] Failed to read manifest metadata: {exc}")
+    if manifest:
+        duckdb_path = manifest.get("duckdb")
+        concepts_table = manifest.get("concepts_table")
 
     exclude_concept_class_ids = to_exclusion_set(getattr(args, "exclude_concept_class_id", None))
     concept_class_resolver: ConceptClassResolver | None = None
@@ -131,17 +169,28 @@ def run(args: argparse.Namespace) -> None:
         if df.empty:
             return query_norm, df
 
-        df = enrich_with_post_scores(
-            df,
-            query_norm,
-            post_strength_weight=float(args.post_strength_weight),
-            post_jaccard_weight=float(args.post_jaccard_weight),
-            post_brand_penalty=float(args.post_brand_penalty),
-            post_minmax=bool(args.post_minmax),
-            post_weight=float(args.post_weight),
-            prefer_brand=True,
-            rank_output=False,
-        )
+        if should_apply_post(str(args.post_mode), float(args.post_weight)):
+            df = enrich_with_post_scores(
+                df,
+                query_norm,
+                post_strength_weight=float(args.post_strength_weight),
+                post_jaccard_weight=float(args.post_jaccard_weight),
+                post_brand_penalty=float(args.post_brand_penalty),
+                post_minmax=bool(args.post_minmax),
+                post_weight=float(args.post_weight),
+                prefer_brand=True,
+                post_mode=str(args.post_mode),
+                tiebreak_eps=float(args.tiebreak_eps),
+                tiebreak_topn=int(args.tiebreak_topn),
+                brand_strict=bool(args.brand_strict),
+            )
+        else:
+            base_col = "_relevance_score" if "_relevance_score" in df.columns else "score"
+            if base_col in df.columns:
+                df = df.sort_values(base_col, ascending=False, kind="mergesort").reset_index(drop=True)
+                df["final_score"] = pd.to_numeric(df[base_col], errors="coerce").fillna(0.0)
+            else:
+                df["final_score"] = 0.0
         return query_norm, df
 
     def _print_results(query_norm: str, df: pd.DataFrame) -> pd.DataFrame:
@@ -243,7 +292,35 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--show-topk", type=int, default=20, help="Number of rows to display")
     parser.add_argument("--device", default="cpu", help="Device: auto|cuda|mps|cpu (default: cpu for stability)")
+    parser.add_argument(
+        "--reranker-id",
+        default=None,
+        help="Model identifier or path for reranker (default: na399/THIRAWAT-reranker-beta; supports local directories)",
+    )
     parser.add_argument("--batch-size", type=int, default=64, help="Embedding batch size")
+    parser.add_argument(
+        "--encoder-model-id",
+        default=None,
+        help="Encoder model id for query embeddings (default: from index manifest or SapBERT).",
+    )
+    parser.add_argument(
+        "--encoder-pooling",
+        choices=["cls", "mean"],
+        default=None,
+        help="Encoder pooling for query embeddings (default: from index manifest).",
+    )
+    parser.add_argument(
+        "--encoder-max-length",
+        type=int,
+        default=None,
+        help="Encoder max token length for query embeddings (default: from index manifest).",
+    )
+    parser.add_argument(
+        "--encoder-trust-remote-code",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="trust_remote_code for encoder model loading (default: from index manifest).",
+    )
     parser.add_argument("--where", default=None, help="Optional LanceDB filter expression, e.g. vocabulary_id = 'RxNorm'")
     parser.add_argument("--query", default=None, help="Run a single lookup and exit (non-interactive mode)")
     parser.add_argument(
@@ -263,10 +340,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Characters to remove from query before retrieval/rerank (e.g., '()[]{}').",
     )
     parser.add_argument(
+        "--inn2usan",
         "--convert-inn-to-usan",
+        dest="inn2usan",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Normalize INN/BAN terms to USAN before performing the lookup.",
+        help="Normalize INN/BAN drug names to USAN before performing the lookup (default: enabled).",
+    )
+    parser.add_argument(
+        "--inn2usan-extra",
+        action="store_true",
+        help="Enable mapper-only extra INN→USAN aliases in addition to trainer parity mapping (default: off).",
     )
     parser.add_argument(
         "--exclude-concept-class-id",
@@ -276,6 +360,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=False, help="Print per-candidate scoring details for the shown rows")
     parser.add_argument("--post-weight", type=float, default=0.05, help="Weight for simple post-score in final blend (0.0 = ML only)")
+    parser.add_argument(
+        "--post-mode",
+        choices=["blend", "tiebreak", "lex"],
+        default="tiebreak",
+        help="Post-score behavior: blend, tiebreak within near-ties, or lexicographic sort",
+    )
+    parser.add_argument("--tiebreak-eps", type=float, default=0.01, help="Score gap threshold for tie groups")
+    parser.add_argument("--tiebreak-topn", type=int, default=50, help="Only tiebreak within the top-N candidates")
+    parser.add_argument("--brand-strict", action="store_true", help="Drop brand-mismatched candidates for bracketed brand queries when possible")
     parser.add_argument("--post-strength-weight", type=float, default=0.6, help="Weight for strength feature within simple score")
     parser.add_argument("--post-jaccard-weight", type=float, default=0.4, help="Weight for jaccard feature within simple score")
     parser.add_argument(

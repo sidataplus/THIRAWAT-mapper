@@ -1,4 +1,4 @@
-"""Token‑interaction pooling utility for BMS‑style reranking."""
+"""Token‑interaction pooling utility for reranking."""
 
 from __future__ import annotations
 

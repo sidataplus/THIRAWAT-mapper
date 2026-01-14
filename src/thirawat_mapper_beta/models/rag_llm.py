@@ -11,6 +11,13 @@ from urllib import error, request
 
 LOGGER = logging.getLogger(__name__)
 
+_STRUCTURED_RANK_SCHEMA = {
+    "type": "object",
+    "properties": {"concept_ids": {"type": "array", "items": {"type": "integer"}}},
+    "required": ["concept_ids"],
+    "additionalProperties": False,
+}
+
 
 def _build_plain_messages(system_prompt: str, user_prompt: str) -> List[Dict[str, str]]:
     """Return chat messages compatible with the Workers AI run endpoint."""
@@ -221,6 +228,7 @@ class OpenRouterConfig:
     api_key: Optional[str] = None
     model_name: str = "openrouter/polaris-alpha"
     base_url: str = "https://openrouter.ai/api/v1"
+    structured: bool = True
 
     def resolve_api_key(self) -> str:
         token = self.api_key or os.getenv("OPENROUTER_API_KEY")
@@ -251,14 +259,24 @@ class OpenRouterLLMClient(BaseLLMClient):
             raise ValueError("Prompt must be non-empty.")
         system_prompt = (
             "You help rank medical terminology candidates. "
-            "Reply with a comma-separated list or JSON array; do not add commentary."
+            "Reply with JSON only: {\"concept_ids\":[...]} and no extra text."
         )
         payload: Dict[str, object] = {
             "model": self.cfg.model_name,
             "messages": _build_plain_messages(system_prompt, prompt),
+            "temperature": 0.0,
         }
+        if self.cfg.structured:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "ranking", "strict": True, "schema": _STRUCTURED_RANK_SCHEMA},
+            }
         if max_new_tokens is not None:
             payload["max_tokens"] = int(max_new_tokens)
+        if temperature is not None:
+            payload["temperature"] = max(0.0, float(temperature))
+        if top_p is not None:
+            payload["top_p"] = float(top_p)
         if stop:
             payload["stop"] = list(stop)
         data = json.dumps(payload).encode("utf-8")

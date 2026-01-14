@@ -66,7 +66,11 @@ DEFAULT_INN_TO_USAN: dict[str, str] = {
     "sodium picosulphate": "sodium picosulfate",
     "beclometasone": "beclomethasone",
     "beclometasone dipropionate": "beclomethasone dipropionate",
-    "glucose": "dextrose"
+}
+
+MAPPER_EXTRA_INN_TO_USAN: dict[str, str] = {
+    # Mapper-only alias; keep off by default for trainer parity.
+    "glucose": "dextrose",
 }
 
 
@@ -96,3 +100,6 @@ def convert_inn_ban_to_usan(text: str, mapping: Mapping[str, str] | None = None)
         return mapping.get(key.lower(), key)
 
     return pattern.sub(_replacer, text)
+
+
+__all__ = ["convert_inn_ban_to_usan", "DEFAULT_INN_TO_USAN", "MAPPER_EXTRA_INN_TO_USAN"]

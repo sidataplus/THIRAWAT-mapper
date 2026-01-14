@@ -6,8 +6,7 @@ from typing import Optional, Sequence, Tuple
 import re
 
 import pandas as pd
-from thirawat_mapper_beta.scoring import batch_features
-from thirawat_mapper_beta.scoring import post_scorer as _ps
+from thirawat_mapper_beta.scoring import batch_features, extract_strengths_with_spans
 from thirawat_mapper_beta.utils import normalize_text_value
 
 
@@ -135,6 +134,64 @@ def _combine_name_profile(name: str | None, profile: str | None) -> str:
     return (n + " " + p).strip()
 
 
+def tiebreak_rerank(
+    df: pd.DataFrame,
+    *,
+    primary_col: str = "_relevance_score",
+    tiebreak_cols: Sequence[str] = (
+        "brand_strength_exact",
+        "top20_strength_form_exact",
+        "brand_score",
+        "rerank_top20",
+        "strength_exact",
+        "strength_sim",
+        "form_route_score",
+        "release_score",
+    ),
+    eps: float = 0.01,
+    topn: int = 50,
+) -> pd.DataFrame:
+    """Reorder candidates using post features only within near-ties of the primary score."""
+
+    if df is None or df.empty or primary_col not in df.columns:
+        return df
+
+    df = df.sort_values(primary_col, ascending=False, kind="mergesort").reset_index(drop=True)
+    if topn <= 0 or len(df) <= 1:
+        return df
+
+    head = df.iloc[: min(topn, len(df))].copy()
+    tail = df.iloc[min(topn, len(df)) :].copy()
+
+    gaps = head[primary_col].shift(1) - head[primary_col]
+    head["_tie_group"] = (gaps > eps).fillna(False).cumsum()
+
+    keys = [c for c in tiebreak_cols if c in head.columns]
+    if not keys:
+        return df
+
+    sort_cols = list(keys) + [primary_col]
+    ascending = [False] * len(sort_cols)
+    groups = []
+    for _, group in head.groupby("_tie_group", sort=False):
+        groups.append(group.sort_values(sort_cols, ascending=ascending, kind="mergesort"))
+    head = pd.concat(groups, ignore_index=True).drop(columns=["_tie_group"])
+
+    return pd.concat([head, tail], ignore_index=True)
+
+
+__all__.append("tiebreak_rerank")
+
+
+def should_apply_post(post_mode: str, post_weight: float) -> bool:
+    if post_mode == "blend":
+        return float(post_weight) > 0.0
+    return True
+
+
+__all__.append("should_apply_post")
+
+
 def enrich_with_post_scores(
     df: pd.DataFrame,
     query_text_norm: str,
@@ -145,14 +202,13 @@ def enrich_with_post_scores(
     post_minmax: bool,
     post_weight: float,
     prefer_brand: bool = True,
-    rank_output: bool = True,
+    post_mode: str = "tiebreak",
+    tiebreak_eps: float = 0.01,
+    tiebreak_topn: int = 50,
+    brand_strict: bool = False,
 ) -> pd.DataFrame:
-    """Attach post-scoring columns and return a ranked DataFrame.
+    """Attach post-score columns and recompute final_score, ranking consistently."""
 
-    Adds columns: strength_sim, jaccard_text, brand_score, post_score, final_score.
-    Uses combined raw text "concept_name + profile_text" for brand detection,
-    normalized profile text for strength/text, and blends with _relevance_score.
-    """
     if df is None or df.empty:
         return df
 
@@ -169,23 +225,95 @@ def enrich_with_post_scores(
         w_brand_penalty=float(post_brand_penalty),
         minmax_within_query=bool(post_minmax),
     )
+    query_has_strength = bool(extract_strengths_with_spans(query_text_norm)[0])
     df = df.copy()
     df["strength_sim"] = feats["strength_sim"]
     df["jaccard_text"] = feats["jaccard_text"]
-    # Recompute brand on raw combined text to preserve bracketed brands
-    try:
-        df["brand_score"] = [_ps.brand_score(query_text_norm, raw) for raw in raw_texts]
-    except Exception:
-        df["brand_score"] = feats["brand_score"]
+    df["brand_score"] = feats["brand_score"]
+    if "release_score" in feats:
+        df["release_score"] = feats["release_score"]
+    if "form_release_score" in feats:
+        df["form_release_score"] = feats["form_release_score"]
+    if "form_route_score" in feats:
+        df["form_route_score"] = feats["form_route_score"]
     df["post_score"] = feats.get("post_score", feats.get("simple_score"))
+    df["strength_exact"] = ((df["strength_sim"] >= 0.99) & query_has_strength).astype(int)
+    if "form_route_score" in df.columns and "strength_sim" in df.columns:
+        exact_strength = (df["strength_sim"] >= 0.99) & query_has_strength
+        if exact_strength.any():
+            mask = exact_strength & (df["form_route_score"] < 0)
+            df.loc[mask, "form_route_score"] = df.loc[mask, "form_route_score"] + 0.5
 
-    relevance = df.get("_relevance_score", pd.Series([0.0] * len(df)))
-    w = float(post_weight)
-    df["final_score"] = (1.0 - w) * relevance.fillna(0.0) + w * df["post_score"].astype(float)
-
-    if not rank_output:
+    base_col = None
+    for col in ("_relevance_score", "score", "final_score"):
+        if col in df.columns:
+            base_col = col
+            break
+    if base_col is None:
         return df
-    return rank_candidates(df, prefer_brand=prefer_brand, drop_private_brand_col=True)
+
+    base_scores = pd.to_numeric(df[base_col], errors="coerce").fillna(float("-inf"))
+    order = base_scores.sort_values(ascending=False, kind="mergesort").index
+    rank = pd.Series(range(1, len(df) + 1), index=order)
+    df["rerank_top20"] = (rank <= 20).astype(int)
+    df["brand_strength_exact"] = ((df["brand_score"] > 0) & (df["strength_exact"] == 1)).astype(int)
+    if "form_route_score" in df.columns:
+        df["top20_strength_form_exact"] = (
+            (df["rerank_top20"] == 1) & (df["strength_exact"] == 1) & (df["form_route_score"] >= 0.5)
+        ).astype(int)
+    else:
+        df["top20_strength_form_exact"] = 0
+
+    if brand_strict and re.search(r"\[([^\[\]]+)\]", query_text_norm or "") and "brand_score" in df.columns:
+        mask = df["brand_score"] >= 0
+        if mask.any():
+            df = df.loc[mask].copy()
+
+    if post_mode == "blend":
+        relevance = df[base_col].astype(float).fillna(0.0)
+        w = float(post_weight)
+        df["final_score"] = (1.0 - w) * relevance + w * df["post_score"].astype(float)
+        return rank_candidates(df, prefer_brand=prefer_brand, drop_private_brand_col=True)
+
+    df["final_score"] = df[base_col].astype(float)
+
+    if post_mode == "lex":
+        sort_cols = [
+            base_col,
+            "brand_strength_exact",
+            "top20_strength_form_exact",
+            "brand_score",
+            "rerank_top20",
+            "strength_exact",
+            "strength_sim",
+            "form_route_score",
+            "release_score",
+        ]
+        sort_cols = [c for c in sort_cols if c in df.columns]
+        df = df.sort_values(sort_cols, ascending=[False] * len(sort_cols), kind="mergesort").reset_index(drop=True)
+        return df
+
+    if post_mode == "tiebreak":
+        tiebreak_cols = [
+            "brand_strength_exact",
+            "top20_strength_form_exact",
+            "brand_score",
+            "rerank_top20",
+            "strength_exact",
+            "strength_sim",
+            "form_route_score",
+            "release_score",
+        ]
+        df = tiebreak_rerank(
+            df,
+            primary_col=base_col,
+            tiebreak_cols=tuple(tiebreak_cols),
+            eps=float(tiebreak_eps),
+            topn=int(tiebreak_topn),
+        )
+        return df
+
+    return df
 
 
 __all__.append("enrich_with_post_scores")
