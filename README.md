@@ -1,6 +1,6 @@
-# thirawat_mapper_beta CLI Guide
+# THIRAWAT mapper (beta) CLI Guide
 
-**T**erminology **H**armonization: **I**ntelligent **R**etrieval with **A**lignment and **W**eighting reranking via **A**utomated **T**ransformers
+**T**erminology **H**armonization using Late-**I**nteraction **R**eranker **W**ith **A**lignment-tuned **T**ransformers
 
 ⚠️⚠️⚠️ **BETA RELEASE** ⚠️⚠️⚠️
 
@@ -30,6 +30,21 @@ MPS on Apple Silicon can produce unstable embeddings/scores with the current bet
 2. Install Hugging Face CLI following https://huggingface.co/docs/huggingface_hub/en/guides/cli
 3. Login via CLI so downloads work from code: `hf auth login`
 
+## Install from PyPI
+
+```bash
+pip install thirawat-mapper
+# or (recommended for global CLI installs)
+pipx install thirawat-mapper
+
+thirawat --help
+```
+
+Command mapping:
+
+- `thirawat index build ...` → `python -m thirawat_mapper.index.build ...`
+- `thirawat infer bulk ...` → `python -m thirawat_mapper.infer.bulk ...`
+- `thirawat infer query ...` → `python -m thirawat_mapper.infer.query ...`
 
 ## Setup with uv
 
@@ -41,7 +56,7 @@ uv sync
 source .venv/bin/activate
 
 # 3. Or just run commands directly via uv
-uv run python -m thirawat_mapper_beta.index.build --help
+uv run python -m thirawat_mapper.index.build --help
 ```
 
 `uv sync` reads the project metadata and installs the required packages (PyTorch, LanceDB, transformers, etc.) against Python 3.11.x. Subsequent `uv run ...` invocations will reuse the same environment. Replace paths in the examples below to match your workspace. All text used for indexing and inference is normalized (lower-cased, whitespace collapsed) for stable matching.
@@ -50,7 +65,7 @@ uv run python -m thirawat_mapper_beta.index.build --help
 ## 1. Build a LanceDB Index
 
 ```bash
-uv run python -m thirawat_mapper_beta.index.build \
+uv run python -m thirawat_mapper.index.build \
   --duckdb data/derived/concepts.duckdb \
   --profiles-table concept_profiles \
   --concepts-table concept \
@@ -88,7 +103,7 @@ The command will:
 ```bash
 export TOKENIZERS_PARALLELISM=false
 
-uv run python -m thirawat_mapper_beta.infer.bulk \
+uv run python -m thirawat_mapper.infer.bulk \
   --db data/lancedb/db \
   --table concepts_drug \
   --input data/usagi.csv \
@@ -165,7 +180,7 @@ General RAG knobs:
 #### Ollama (local GGUF/chat server)
 
 ```bash
-uv run python -m thirawat_mapper_beta.infer.bulk \
+uv run python -m thirawat_mapper.infer.bulk \
   --db data/lancedb/db \
   --table concepts_drug \
   --input data/input/usagi.csv \
@@ -190,7 +205,7 @@ Ollama-specific flags:
 Use `--rag-provider llamacpp` only when a [llama.cpp `llama-server`](https://github.com/ggerganov/llama.cpp/tree/master/examples/server) process is already running (default `http://127.0.0.1:8080`). Launch the server separately with your desired context and batching flags (for example: `llama-server -hf ggml-org/gpt-oss-20b-GGUF --ctx-size 0 --jinja -ub 2048 -b 2048 -fa on`). Point the CLI at that HTTP endpoint, not at GGUF files directly:
 
 ```bash
-uv run python -m thirawat_mapper_beta.infer.bulk \
+uv run python -m thirawat_mapper.infer.bulk \
   --db data/lancedb/db \
   --table concepts_drug \
   --input data/input/usagi.csv \
@@ -220,7 +235,7 @@ For all providers, the CLI logs each prompt/response pair and the parsed candida
 ```bash
 export OPENROUTER_API_KEY=<YOUR_KEY>
 
-uv run python -m thirawat_mapper_beta.infer.bulk \
+uv run python -m thirawat_mapper.infer.bulk \
   --db data/lancedb/db \
   --table concepts_drug \
   --input data/input/usagi.csv \
@@ -238,7 +253,7 @@ Set `OPENROUTER_API_KEY` in your environment; the CLI will refuse to call OpenRo
 export CLOUDFLARE_ACCOUNT_ID=<ACCOUNT_ID>
 export CLOUDFLARE_API_TOKEN=<API_TOKEN>
 
-uv run python -m thirawat_mapper_beta.infer.bulk \
+uv run python -m thirawat_mapper.infer.bulk \
   --db data/lancedb/db \
   --table concepts_drug \
   --input data/input/usagi.csv \
@@ -265,7 +280,7 @@ Set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in your environment befor
 ## 3. Interactive Query (REPL)
 
 ```bash
-uv run python -m thirawat_mapper_beta.infer.query \
+uv run python -m thirawat_mapper.infer.query \
   --db data/lancedb/db \
   --table concepts_drug \
   --device cpu \

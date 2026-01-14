@@ -3,7 +3,7 @@ import math
 import numpy as np
 import torch
 
-from thirawat_mapper_beta.models.embedder import SapBERTEmbedder
+from thirawat_mapper.models.embedder import SapBERTEmbedder
 
 
 class _DummyTokenizer:
@@ -43,11 +43,11 @@ class _DummyModel:
 
 def test_embedder_cls_pooling(monkeypatch):
     monkeypatch.setattr(
-        "thirawat_mapper_beta.models.embedder.AutoTokenizer.from_pretrained",
+        "thirawat_mapper.models.embedder.AutoTokenizer.from_pretrained",
         lambda *args, **kwargs: _DummyTokenizer(),
     )
     monkeypatch.setattr(
-        "thirawat_mapper_beta.models.embedder.AutoModel.from_pretrained",
+        "thirawat_mapper.models.embedder.AutoModel.from_pretrained",
         lambda *args, **kwargs: _DummyModel(),
     )
 
@@ -60,11 +60,11 @@ def test_embedder_cls_pooling(monkeypatch):
 
 def test_embedder_mean_pooling_respects_attention_mask(monkeypatch):
     monkeypatch.setattr(
-        "thirawat_mapper_beta.models.embedder.AutoTokenizer.from_pretrained",
+        "thirawat_mapper.models.embedder.AutoTokenizer.from_pretrained",
         lambda *args, **kwargs: _DummyTokenizer(),
     )
     monkeypatch.setattr(
-        "thirawat_mapper_beta.models.embedder.AutoModel.from_pretrained",
+        "thirawat_mapper.models.embedder.AutoModel.from_pretrained",
         lambda *args, **kwargs: _DummyModel(),
     )
 
@@ -74,4 +74,3 @@ def test_embedder_mean_pooling_respects_attention_mask(monkeypatch):
     # mean([1,0],[0,1]) -> [0.5,0.5] then L2-normalized
     expected = np.array([1 / math.sqrt(2), 1 / math.sqrt(2)], dtype=np.float32)
     assert np.allclose(vec[0], expected, atol=1e-6)
-

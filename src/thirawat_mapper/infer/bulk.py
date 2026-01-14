@@ -12,8 +12,8 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 import pandas as pd
 from tqdm.auto import tqdm
 
-from thirawat_mapper_beta.io import coerce_usagi_row, export_relabel_csv, is_usagi_format, validate_usagi_frame
-from thirawat_mapper_beta.models import (
+from thirawat_mapper.io import coerce_usagi_row, export_relabel_csv, is_usagi_format, validate_usagi_frame
+from thirawat_mapper.models import (
     DEFAULT_RERANKER_ID,
     CloudflareConfig,
     CloudflareLLMClient,
@@ -32,7 +32,7 @@ from thirawat_mapper_beta.models import (
     ThirawatReranker,
     to_candidates,
 )
-from thirawat_mapper_beta.models.embedder import DEFAULT_MODEL_ID
+from thirawat_mapper.models.embedder import DEFAULT_MODEL_ID
 from .conversion import DEFAULT_INN_TO_USAN, MAPPER_EXTRA_INN_TO_USAN, convert_inn_ban_to_usan
 from .shared_filters import AtcScopeResolver, ConceptClassResolver, safe_int, to_exclusion_set
 from .utils import (
@@ -45,7 +45,7 @@ from .utils import (
     sanitize_query_text,
     normalize_strength_spacing,
 )
-from thirawat_mapper_beta.utils import connect_table, normalize_text_value
+from thirawat_mapper.utils import connect_table, normalize_text_value
 
 
 DEFAULT_TOPK = 100

@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from thirawat_mapper_beta.models.rag_llm import OpenRouterConfig, OpenRouterLLMClient
+from thirawat_mapper.models.rag_llm import OpenRouterConfig, OpenRouterLLMClient
 
 
 def test_openrouter_config_uses_env(monkeypatch):
@@ -36,7 +36,7 @@ def test_openrouter_client_builds_request(monkeypatch):
         return DummyResponse(body)
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret")
-    monkeypatch.setattr("thirawat_mapper_beta.models.rag_llm.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("thirawat_mapper.models.rag_llm.request.urlopen", fake_urlopen)
 
     cfg = OpenRouterConfig()
     client = OpenRouterLLMClient(cfg)

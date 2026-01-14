@@ -3,11 +3,11 @@ requires = ["hatchling>=1.21"]
 build-backend = "hatchling.build"
 
 [project]
-name = "thirawat-mapper-beta"
-version = "0.1.1"
+name = "thirawat-mapper"
+dynamic = ["version"]
 description = "Minimal indexing and inference toolkit for terminology mapping."
 readme = "README.md"
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.11"
 authors = [{ name = "Natthawut Max Adulyanukosol", email = "max@sidata.plus" }]
 
 dependencies = [
@@ -32,6 +32,9 @@ dependencies = [
   "pydantic>=2.7",
 ]
 
+[project.scripts]
+thirawat = "thirawat_mapper.cli:main"
+
 [dependency-groups]
 dev = ["pytest>=8.0"]
 
@@ -40,14 +43,18 @@ Repository = "https://sidata.plus/projects/thirawat-mapper-beta"
 Issues = "https://sidata.plus/support"
 
 [tool.hatch.version]
-path = "src/thirawat_mapper_beta/__init__.py"
+path = "src/thirawat_mapper/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/thirawat_mapper_beta"]
+packages = ["src/thirawat_mapper"]
 
 [tool.hatch.build.targets.sdist]
 include = [
   "README.md",
-  "spec/",
+  "pyproject.toml",
   "src/",
+  "tests/",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

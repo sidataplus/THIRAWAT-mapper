@@ -1,7 +1,7 @@
 import pytest
 
-from thirawat_mapper_beta.models.rag_pipeline import RAGPipeline
-from thirawat_mapper_beta.models.rag_prompt import RagCandidate
+from thirawat_mapper.models.rag_pipeline import RAGPipeline
+from thirawat_mapper.models.rag_prompt import RagCandidate
 
 
 class DummyLLM:
@@ -40,4 +40,3 @@ def test_rag_pipeline_raises_when_no_valid_ids_returned():
     cands = [RagCandidate(concept_id=1), RagCandidate(concept_id=2)]
     with pytest.raises(ValueError):
         pipeline.rerank("q", cands)
-

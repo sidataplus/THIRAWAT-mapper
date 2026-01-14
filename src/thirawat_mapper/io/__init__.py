@@ -1,4 +1,4 @@
-"""I/O helpers for thirawat_mapper_beta."""
+"""I/O helpers for thirawat_mapper."""
 
 from .duckdb_read import read_concept_profiles
 from .export_csv import export_relabel_csv

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import duckdb
 
-from thirawat_mapper_beta.io.duckdb_read import read_concept_profiles
+from thirawat_mapper.io.duckdb_read import read_concept_profiles
 
 
 def _build_duckdb(db_path: Path) -> None:
@@ -80,4 +80,3 @@ def test_read_concept_profiles_domain_and_class_filters(tmp_path):
     # Only concept_id 1 matches domain=Drug and class=Clinical Drug
     assert df.shape[0] == 1
     assert df["concept_id"].iat[0] == 1
-

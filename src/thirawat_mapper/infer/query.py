@@ -9,10 +9,10 @@ from typing import Sequence
 
 import pandas as pd
 
-from thirawat_mapper_beta.models import DEFAULT_RERANKER_ID, SapBERTEmbedder, ThirawatReranker
-from thirawat_mapper_beta.models.embedder import DEFAULT_MODEL_ID
-from thirawat_mapper_beta.scoring import post_scorer as ps  # for --debug internals
-from thirawat_mapper_beta.utils import connect_table, normalize_text_value
+from thirawat_mapper.models import DEFAULT_RERANKER_ID, SapBERTEmbedder, ThirawatReranker
+from thirawat_mapper.models.embedder import DEFAULT_MODEL_ID
+from thirawat_mapper.scoring import post_scorer as ps  # for --debug internals
+from thirawat_mapper.utils import connect_table, normalize_text_value
 from .conversion import DEFAULT_INN_TO_USAN, MAPPER_EXTRA_INN_TO_USAN, convert_inn_ban_to_usan
 from .shared_filters import ConceptClassResolver, safe_int, to_exclusion_set
 from .utils import (

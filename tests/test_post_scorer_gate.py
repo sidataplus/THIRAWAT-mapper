@@ -1,4 +1,4 @@
-from thirawat_mapper_beta.scoring import post_scorer as ps
+from thirawat_mapper.scoring import post_scorer as ps
 
 
 def test_dose_gate_zero_simple_score_on_large_mismatch():

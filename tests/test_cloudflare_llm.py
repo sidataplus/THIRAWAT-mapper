@@ -1,4 +1,4 @@
-from thirawat_mapper_beta.models.rag_llm import (
+from thirawat_mapper.models.rag_llm import (
     _build_plain_messages,
     _build_responses_messages,
     _extract_text_from_cf_payload,

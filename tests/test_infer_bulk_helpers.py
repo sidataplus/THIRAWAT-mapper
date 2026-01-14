@@ -1,6 +1,6 @@
 import pandas as pd
 
-from thirawat_mapper_beta.infer.bulk import _prepare_queries, _compute_metrics
+from thirawat_mapper.infer.bulk import _prepare_queries, _compute_metrics
 
 
 def test_prepare_queries_handles_missing_and_codes():

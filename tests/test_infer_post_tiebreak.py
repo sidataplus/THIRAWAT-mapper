@@ -1,6 +1,6 @@
 import pandas as pd
 
-from thirawat_mapper_beta.infer.utils import (
+from thirawat_mapper.infer.utils import (
     enrich_with_post_scores,
     should_apply_post,
     tiebreak_rerank,

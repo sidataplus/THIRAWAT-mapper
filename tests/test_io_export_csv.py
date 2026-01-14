@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from thirawat_mapper_beta.io.export_csv import export_relabel_csv
+from thirawat_mapper.io.export_csv import export_relabel_csv
 
 
 def _block_order(df: pd.DataFrame) -> list[str]:

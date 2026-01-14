@@ -12,10 +12,10 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from thirawat_mapper_beta.io import read_concept_profiles
-from thirawat_mapper_beta.models import SapBERTEmbedder
-from thirawat_mapper_beta.models.embedder import DEFAULT_MODEL_ID
-from thirawat_mapper_beta.utils import normalize_text_value
+from thirawat_mapper.io import read_concept_profiles
+from thirawat_mapper.models import SapBERTEmbedder
+from thirawat_mapper.models.embedder import DEFAULT_MODEL_ID
+from thirawat_mapper.utils import normalize_text_value
 
 EXCLUDED_CONCEPT_CLASSES = (
     "Gene DNA Variant",

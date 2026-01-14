@@ -1,7 +1,7 @@
 import argparse
 
-from thirawat_mapper_beta.infer.bulk import _resolve_encoder_config
-from thirawat_mapper_beta.models.embedder import DEFAULT_MODEL_ID
+from thirawat_mapper.infer.bulk import _resolve_encoder_config
+from thirawat_mapper.models.embedder import DEFAULT_MODEL_ID
 
 
 def test_resolve_encoder_config_prefers_manifest_defaults():
@@ -40,4 +40,3 @@ def test_resolve_encoder_config_falls_back_when_no_manifest():
     assert cfg["pooling"] == "cls"
     assert cfg["max_length"] == 128
     assert cfg["trust_remote_code"] is False
-

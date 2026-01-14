@@ -1,4 +1,4 @@
-"""Model wrappers used in the thirawat_mapper_beta toolkit."""
+"""Model wrappers used in the thirawat_mapper toolkit."""
 
 from .embedder import SapBERTEmbedder
 from .rag_llm import (

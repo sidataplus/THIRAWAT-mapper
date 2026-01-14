@@ -1,6 +1,6 @@
 import pandas as pd
 
-from thirawat_mapper_beta.io.usagi import coerce_usagi_row, is_usagi_format, validate_usagi_frame
+from thirawat_mapper.io.usagi import coerce_usagi_row, is_usagi_format, validate_usagi_frame
 
 
 def test_is_usagi_format_and_validation():

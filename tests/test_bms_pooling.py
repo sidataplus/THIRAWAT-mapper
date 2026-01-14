@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from thirawat_mapper_beta.models.bms_pooling import bms_scores
+from thirawat_mapper.models.bms_pooling import bms_scores
 
 
 def _ref_bms_scores(q, d, qmask=None, dmask=None):

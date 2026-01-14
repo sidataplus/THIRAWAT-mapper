@@ -1,7 +1,7 @@
 import pandas as pd
 
-from thirawat_mapper_beta.infer.bulk import _apply_atc_scope
-from thirawat_mapper_beta.infer.shared_filters import AtcScopeResolver
+from thirawat_mapper.infer.bulk import _apply_atc_scope
+from thirawat_mapper.infer.shared_filters import AtcScopeResolver
 
 
 def test_apply_atc_scope_stable_sorts_matches_first():
@@ -68,4 +68,3 @@ def test_atc_scope_resolver_respects_allowlist_max_ids(monkeypatch, tmp_path):
     resolver = AtcScopeResolver(tmp_path / "vocab.duckdb")
     allowlist = resolver.build_allowlist(df_in, allowlist_max_ids=1)
     assert allowlist == {}
-

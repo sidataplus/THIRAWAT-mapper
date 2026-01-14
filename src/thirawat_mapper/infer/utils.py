@@ -6,8 +6,8 @@ from typing import Optional, Sequence, Tuple
 import re
 
 import pandas as pd
-from thirawat_mapper_beta.scoring import batch_features, extract_strengths_with_spans
-from thirawat_mapper_beta.utils import normalize_text_value
+from thirawat_mapper.scoring import batch_features, extract_strengths_with_spans
+from thirawat_mapper.utils import normalize_text_value
 
 
 def resolve_device(name: Optional[str]) -> str:
