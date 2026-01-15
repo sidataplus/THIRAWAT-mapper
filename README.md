@@ -14,11 +14,11 @@
 1. Request and download the standard concepts in csv format from [https://athena.ohdsi.org/](https://athena.ohdsi.org/)
 2. Convert the csv files into a DuckDB database using [sidataplus/athena2duckdb](https://github.com/sidataplus/athena2duckdb)
 
-### Model access
+### Models
 
-1. Request access on Hugging Face: https://huggingface.co/na399/THIRAWAT-reranker-beta  (click "Access request" / accept terms)
-2. Install Hugging Face CLI following https://huggingface.co/docs/huggingface_hub/en/guides/cli
-3. Login via CLI so downloads work from code: `hf auth login`
+Fine-tuned reranker models are hosted on [Hugging Face](https://huggingface.co/collections/sidataplus/thirawat).
+
+Pre-built indexes will be made available soon.
 
 ## Install from PyPI
 
@@ -36,26 +36,12 @@ Command mapping:
 - `thirawat infer bulk ...` → `python -m thirawat_mapper.infer.bulk ...`
 - `thirawat infer query ...` → `python -m thirawat_mapper.infer.query ...`
 
-## Setup with uv
-
-```bash
-# 1. Install dependencies into a local virtual environment (creates .venv/)
-uv sync
-
-# 2. (Optional) Activate the environment for interactive shells
-source .venv/bin/activate
-
-# 3. Or just run commands directly via uv
-uv run python -m thirawat_mapper.index.build --help
-```
-
-`uv sync` reads the project metadata and installs the required packages (PyTorch, LanceDB, transformers, etc.) against Python 3.11.x. Subsequent `uv run ...` invocations will reuse the same environment. Replace paths in the examples below to match your workspace. All text used for indexing and inference is normalized (lower-cased, whitespace collapsed) for stable matching.
 
 
 ## 1. Build a LanceDB Index
 
 ```bash
-uv run python -m thirawat_mapper.index.build \
+thirawat index build \
   --duckdb data/derived/concepts.duckdb \
   --profiles-table concept_profiles \
   --concepts-table concept \
@@ -87,13 +73,39 @@ The command will:
 3. Write a LanceDB table where `vector` is a `FixedSizeList<float32>[768]` column.
 4. Emit a `<table>_manifest.json` manifest describing the build (model id, filters, counts).
 
+## 2. Interactive Query (REPL)
 
-## 2. Bulk Inference
+```bash
+thirawat infer query \
+  --db data/lancedb/db \
+  --table concepts_drug \
+  --device cpu \
+  --reranker-id sidataplus/THIRAWAT-BioLORD  # optional override; defaults to sidataplus/THIRAWAT-SapBERT
+```
+
+Type a query and press Enter to see the post-scored top results:
+
+```
+query> amoxicillin clavulanate 875 mg
+concept_id   | score  | s_sim | name
+--------------------------------------------------------------------------------
+123456       | 0.841  | 0.990 | Amoxicillin / Clavulanate 875 MG Oral Tablet
+...
+```
+
+Commands:
+
+- Type `:q`, `:quit`, or `:exit` to leave.
+- Use `--candidate-topk` to change the candidate pool and `--show-topk` to limit display rows.
+- `--reranker-id` works here too if you want to test a local or alternative reranker in the REPL.
+
+
+## 3. Bulk Inference
 
 ```bash
 export TOKENIZERS_PARALLELISM=false
 
-uv run python -m thirawat_mapper.infer.bulk \
+thirawat infer bulk \
   --db data/lancedb/db \
   --table concepts_drug \
   --input data/usagi.csv \
@@ -128,7 +140,7 @@ Selected flags:
 - `--brand-strict` - For bracketed brand queries, drop brand-mismatched candidates when possible.
 - `--inn2usan/--no-inn2usan` - Normalize INN/BAN drug names to USAN during inference (default enabled).
 - `--atc-scope` - Boost candidates matching per-row `atc_ids`/`atc_codes` (requires `--vocab` or a DuckDB path in the index manifest).
-- `--reranker-id` - Override the default reranker (`na399/THIRAWAT-reranker-beta`) with another HF model ID or a local directory/filename. Relative paths are resolved to absolute paths so you can pass `models/nde_biolord`.
+- `--reranker-id` - Override the default reranker (`sidataplus/THIRAWAT-SapBERT`) with another HF model ID or a local directory/filename. Relative paths are resolved to absolute paths so you can pass `models/nde_biolord`.
 
 Pipeline steps per row:
 
@@ -145,7 +157,7 @@ Outputs (written to `--out`):
 - `results_usagi.csv` - Always emitted. Each processed row is coerced into the Usagi schema (using the sample in `data/eval/tmt_to_rxnorm.csv` as ground truth). The top candidate populates `conceptId`, `conceptName`, `domainId`, and `matchScore` when available; otherwise those fields remain blank. Every row is marked `mappingStatus=UNCHECKED`, `statusSetBy=THIRAWAT-mapper`, `mappingType=MAPS_TO` so reviewers can import the file directly into Usagi even when the source sheet was not originally in that format.
 - `metrics.json` - When ground-truth IDs are available (either via `conceptId` or Usagi rows with `mappingStatus == APPROVED`) the file reports Hit@{1,2,5,10,20,50,100}, MRR@100, coverage, and counts.
 
-### 2.1 LLM-assisted RAG reranking
+### LLM-assisted RAG reranking
 
 Bulk inference can optionally send the top reranked candidates to an LLM for tie-breaking or abstention logic. Enable this flow with `--rag-provider` and supply provider-specific flags. The CLI saves every prompt/response pair to `rag_prompts.md` under the chosen `--out` directory so you can audit exactly what was sent.
 
@@ -170,7 +182,7 @@ General RAG knobs:
 #### Ollama (local GGUF/chat server)
 
 ```bash
-uv run python -m thirawat_mapper.infer.bulk \
+thirawat infer bulk \
   --db data/lancedb/db \
   --table concepts_drug \
   --input data/input/usagi.csv \
@@ -195,7 +207,7 @@ Ollama-specific flags:
 Use `--rag-provider llamacpp` only when a [llama.cpp `llama-server`](https://github.com/ggerganov/llama.cpp/tree/master/examples/server) process is already running (default `http://127.0.0.1:8080`). Launch the server separately with your desired context and batching flags (for example: `llama-server -hf ggml-org/gpt-oss-20b-GGUF --ctx-size 0 --jinja -ub 2048 -b 2048 -fa on`). Point the CLI at that HTTP endpoint, not at GGUF files directly:
 
 ```bash
-uv run python -m thirawat_mapper.infer.bulk \
+thirawat infer bulk \
   --db data/lancedb/db \
   --table concepts_drug \
   --input data/input/usagi.csv \
@@ -225,7 +237,7 @@ For all providers, the CLI logs each prompt/response pair and the parsed candida
 ```bash
 export OPENROUTER_API_KEY=<YOUR_KEY>
 
-uv run python -m thirawat_mapper.infer.bulk \
+thirawat infer bulk \
   --db data/lancedb/db \
   --table concepts_drug \
   --input data/input/usagi.csv \
@@ -243,7 +255,7 @@ Set `OPENROUTER_API_KEY` in your environment; the CLI will refuse to call OpenRo
 export CLOUDFLARE_ACCOUNT_ID=<ACCOUNT_ID>
 export CLOUDFLARE_API_TOKEN=<API_TOKEN>
 
-uv run python -m thirawat_mapper.infer.bulk \
+thirawat infer bulk \
   --db data/lancedb/db \
   --table concepts_drug \
   --input data/input/usagi.csv \
@@ -267,37 +279,27 @@ Set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in your environment befor
 - Models under `@cf/openai/*` (for example `@cf/openai/gpt-oss-120b`) use the Workers AI Responses API, so leave `--cloudflare-use-responses-api` enabled to send the prompt as an `input` payload.
 - Meta's `@cf/meta/llama-4-*` family is served via the `/ai/run/<model>` endpoint-pass `--no-cloudflare-use-responses-api` when targeting those models so the CLI emits the `messages` payload the endpoint expects.
 
-## 3. Interactive Query (REPL)
+
+## Developement
 
 ```bash
-uv run python -m thirawat_mapper.infer.query \
-  --db data/lancedb/db \
-  --table concepts_drug \
-  --device cpu \
-  --reranker-id models/nde_biolord  # optional override; defaults to na399/THIRAWAT-reranker-beta
+# 1. Install dependencies into a local virtual environment (creates .venv/)
+uv sync
+
+# 2. (Optional) Activate the environment for interactive shells
+source .venv/bin/activate
+
+# 3. Or just run commands directly via uv
+uv run python -m thirawat_mapper.index.build --help
 ```
 
-Type a query and press Enter to see the post-scored top results:
-
-```
-query> amoxicillin clavulanate 875 mg
-concept_id   | score  | s_sim | name
---------------------------------------------------------------------------------
-123456       | 0.841  | 0.990 | Amoxicillin / Clavulanate 875 MG Oral Tablet
-...
-```
-
-Commands:
-
-- Type `:q`, `:quit`, or `:exit` to leave.
-- Use `--candidate-topk` to change the candidate pool and `--show-topk` to limit display rows.
-- `--reranker-id` works here too if you want to test a local or alternative reranker in the REPL.
+`uv sync` reads the project metadata and installs the required packages (PyTorch, LanceDB, transformers, etc.) against Python 3.11.x. Subsequent `uv run ...` invocations will reuse the same environment. Replace paths in the examples below to match your workspace. All text used for indexing and inference is normalized (lower-cased, whitespace collapsed) for stable matching.
 
 
 ## Notes & Requirements
 
 - Vector-only retrieval + reranking (no FTS/BM25/hybrid in beta).
 - Text is normalized (lowercase + collapsed whitespace) for indexing and inference.
-- The reranker model `na399/THIRAWAT-reranker-beta` is a gated model on Hugging Face. You must request access on the model page (web) and login via the CLI before running; you can also point `--reranker-id` at a local ColBERT-style checkpoint (e.g., `models/nde_biolord`) without re-authenticating.
+- The reranker model `sidataplus/THIRAWAT-SapBERT` is a gated model on Hugging Face. You must request access on the model page (web) and login via the CLI before running; you can also point `--reranker-id` at a local ColBERT-style checkpoint (e.g., `models/nde_biolord`) without re-authenticating.
 - LanceDB tables must expose a float32 fixed-size vector column (named `vector` when built with this CLI).
 - Index build keeps only standard, valid OMOP concepts (`standard_concept='S' AND invalid_reason IS NULL`).

@@ -295,7 +295,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--reranker-id",
         default=None,
-        help="Model identifier or path for reranker (default: na399/THIRAWAT-reranker-beta; supports local directories)",
+        help="Model identifier or path for reranker (default: sidataplus/THIRAWAT-SapBERT; supports local directories)",
     )
     parser.add_argument("--batch-size", type=int, default=64, help="Embedding batch size")
     parser.add_argument(

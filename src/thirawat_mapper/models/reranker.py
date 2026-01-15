@@ -16,7 +16,7 @@ import torch
 
 from .bms_pooling import bms_scores
 
-DEFAULT_RERANKER_ID = "na399/THIRAWAT-reranker-beta"
+DEFAULT_RERANKER_ID = "sidataplus/THIRAWAT-SapBERT"
 
 
 def _resolve_model_id(model_id: str | PathLike[str]) -> str:
