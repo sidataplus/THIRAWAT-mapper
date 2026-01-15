@@ -1,16 +1,6 @@
-# THIRAWAT mapper (beta) CLI Guide
+# THIRAWAT Mapper 
 
 **T**erminology **H**armonization using Late-**I**nteraction **R**eranker **W**ith **A**lignment-tuned **T**ransformers
-
-⚠️⚠️⚠️ **BETA RELEASE** ⚠️⚠️⚠️
-
-**Only support Drug domain concepts in this beta.**
-
-**Use CUDA (`--device cuda`) or CPU (`--device cpu`) for correctness**.
-
-MPS on Apple Silicon can produce unstable embeddings/scores with the current beta models. We will release a fix in the full release.
-
-⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
 
 ## Prerequisites
 
