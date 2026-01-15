@@ -14,7 +14,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -41,24 +41,12 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          VERSION="$(
-            python - <<'PY'
-            import pathlib
-            import re
-            import sys
-
-            text = pathlib.Path("src/thirawat_mapper/__init__.py").read_text(encoding="utf-8")
-            match = re.search(r'__version__\\s*=\\s*"([^"]+)"', text)
-            if not match:
-              sys.exit("Could not find __version__ in src/thirawat_mapper/__init__.py")
-            print(match.group(1))
-            PY
-          )"
-          EXPECTED="v${VERSION}"
-          if [ "${TAG}" != "${EXPECTED}" ]; then
-            echo "Tag '${TAG}' does not match package version '${VERSION}' (expected '${EXPECTED}')."
+          EXPECTED_VERSION="${TAG#v}"
+          if [ -z "${EXPECTED_VERSION}" ] || [ "${EXPECTED_VERSION}" = "${TAG}" ]; then
+            echo "Tag '${TAG}' must start with 'v' (example: v0.1.2)."
             exit 1
           fi
+          echo "EXPECTED_VERSION=${EXPECTED_VERSION}" >> "${GITHUB_ENV}"
 
       - name: Install dependencies
         run: uv sync --group dev
@@ -72,6 +60,13 @@ jobs:
       - name: Build distributions
         run: uv run python -m build
 
+      - name: Verify built artifacts match tag
+        env:
+          EXPECTED_VERSION: ${{ env.EXPECTED_VERSION }}
+        run: |
+          test -f "dist/thirawat_mapper-${EXPECTED_VERSION}.tar.gz"
+          ls "dist/thirawat_mapper-${EXPECTED_VERSION}-"*.whl >/dev/null
+
       - name: Check distributions
         run: uv run python -m twine check dist/*
 
@@ -80,4 +75,3 @@ jobs:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: uv run python -m twine upload --skip-existing dist/*
-

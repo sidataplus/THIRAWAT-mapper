@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import argparse
+from importlib.metadata import PackageNotFoundError, version
 from typing import Sequence
 
-from thirawat_mapper import __version__
+
+def _resolve_version() -> str:
+    try:
+        return version("thirawat-mapper")
+    except PackageNotFoundError:  # pragma: no cover - import-path execution without install
+        return "0.0.0"
 
 
 def _run_index_build(argv: Sequence[str]) -> None:
@@ -34,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"%(prog)s {__version__}",
+        version=f"%(prog)s {_resolve_version()}",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
