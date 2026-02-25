@@ -47,24 +47,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     index_parser = subparsers.add_parser("index", help="Index operations")
     index_subparsers = index_parser.add_subparsers(dest="index_command", required=True)
-    index_build_parser = index_subparsers.add_parser("build", help="Build a LanceDB index")
-    index_build_parser.add_argument("args", nargs=argparse.REMAINDER)
-    index_build_parser.set_defaults(func=lambda ns: _run_index_build(ns.args))
+    # Leaf command help is delegated to the underlying module parser.
+    index_build_parser = index_subparsers.add_parser("build", help="Build a LanceDB index", add_help=False)
+    index_build_parser.set_defaults(func=_run_index_build)
 
     infer_parser = subparsers.add_parser("infer", help="Inference operations")
     infer_subparsers = infer_parser.add_subparsers(dest="infer_command", required=True)
-    infer_bulk_parser = infer_subparsers.add_parser("bulk", help="Run bulk inference")
-    infer_bulk_parser.add_argument("args", nargs=argparse.REMAINDER)
-    infer_bulk_parser.set_defaults(func=lambda ns: _run_infer_bulk(ns.args))
+    infer_bulk_parser = infer_subparsers.add_parser("bulk", help="Run bulk inference", add_help=False)
+    infer_bulk_parser.set_defaults(func=_run_infer_bulk)
 
-    infer_query_parser = infer_subparsers.add_parser("query", help="Interactive query (REPL)")
-    infer_query_parser.add_argument("args", nargs=argparse.REMAINDER)
-    infer_query_parser.set_defaults(func=lambda ns: _run_infer_query(ns.args))
+    infer_query_parser = infer_subparsers.add_parser("query", help="Interactive query (REPL)", add_help=False)
+    infer_query_parser.set_defaults(func=_run_infer_query)
 
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     parser = build_parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
-    args.func(args)
+    args, passthrough = parser.parse_known_args(list(argv) if argv is not None else None)
+    args.func(passthrough)
