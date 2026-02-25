@@ -6,7 +6,7 @@
 
 ### Environment
 
-1. Python
+1. Python 3.10+
 2. [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
 
 ### OHDSI Standard Concepts
@@ -58,13 +58,45 @@ thirawat index build \
 Key options:
 
 - `--duckdb` - DuckDB file produced by [`sidataplus/athena2duckdb`](https://github.com/sidataplus/athena2duckdb).
-- `--profiles-table` - Table containing `concept_id` and `profile_text` columns.
+- `--profiles-table` - Preferred table containing `concept_id` and `profile_text`. If the table is missing, the builder falls back to generating profiles inline from `concept` (and `concept_synonym` when available).
 - `--concepts-table` - OMOP concept table (defaults to `concept`). The builder always joins to this table and keeps only standard, valid concepts (`standard_concept = 'S' AND invalid_reason IS NULL`).
 - `--domain-id`, `--concept-class-id` - Optional filters; accept comma-separated lists or repeated flags.
 - `--exclude-concept-class-id` - Exclude specific classes (comma-separated or repeat flag). Default empty; recommended exclusions: Clinical Drug Box, Branded Drug Box, Branded Pack Box, Clinical Pack Box, Marketed Product, Quant Branded Box, Quant Clinical Box.
 - `--extra-column` - Carry additional columns from the profiles table into LanceDB (repeat flag).
+- `--max-synonyms` - Number of synonyms appended when inline profile generation is used.
+- `--include-codes-in-text` - Include `concept_code` in generated inline profile text.
 - `--model-id`, `--pooling`, `--max-length` - Encoder controls for building the index vectors (also written into the index manifest for inference defaults).
 - `--out-db` / `--table` - Target LanceDB directory and table name.
+
+If your Athena-to-DuckDB file does not contain a `concept_profiles` table, the command still works via inline profile generation:
+
+```bash
+thirawat index build \
+  --duckdb data/derived/concepts.duckdb \
+  --profiles-table concept_profiles \
+  --concepts-table concept \
+  --out-db data/lancedb/db \
+  --table concepts_drug \
+  --max-synonyms 3 \
+  --include-codes-in-text
+```
+
+Device matrix:
+
+- `index build --device`: explicit `cuda|mps|cpu`. If omitted, the encoder uses `cuda` when available, otherwise `cpu`.
+- `infer bulk/query --device`: `auto|cuda|mps|cpu` (default `cpu` for stability; `auto` prefers `cuda`, then `mps`, then `cpu`).
+
+Apple Silicon example:
+
+```bash
+thirawat index build \
+  --duckdb data/derived/concepts.duckdb \
+  --profiles-table concept_profiles \
+  --concepts-table concept \
+  --out-db data/lancedb/db \
+  --table concepts_drug \
+  --device mps
+```
 
 The command will:
 
@@ -132,7 +164,7 @@ Selected flags:
 - `--batch-size` - Query embedding batch size (increase for better GPU throughput).
 - `--n-limit` - Limit to the first N rows (smoke runs).
 - `--where` - Optional LanceDB filter, e.g., `vocabulary_id = 'RxNorm' AND concept_class_id != 'Ingredient'` (when those columns exist in the index).
-- `--device` - `auto|cuda|mps|cpu` (default `auto` with safe fallback and fast matmul).
+- `--device` - `auto|cuda|mps|cpu` (default `cpu` for stability; use `auto` to prefer `cuda`, then `mps`, then `cpu`).
 - `--encoder-model-id`, `--encoder-pooling`, `--encoder-max-length` - Override the query encoder used for retrieval (defaults to the index manifest when present).
 - `--post-mode` - Post-score behavior: `blend|tiebreak|lex` (default `tiebreak`).
 - `--post-weight` - Blend weight (only when `--post-mode blend`, default `0.05`).
@@ -141,6 +173,29 @@ Selected flags:
 - `--inn2usan/--no-inn2usan` - Normalize INN/BAN drug names to USAN during inference (default enabled).
 - `--atc-scope` - Boost candidates matching per-row `atc_ids`/`atc_codes` (requires `--vocab` or a DuckDB path in the index manifest).
 - `--reranker-id` - Override the default reranker (`sidataplus/THIRAWAT-SapBERT`) with another HF model ID or a local directory/filename. Relative paths are resolved to absolute paths so you can pass `models/nde_biolord`.
+
+### Deterministic post-ranking modes
+
+`--post-mode` controls how post features influence ranking:
+
+- `tiebreak` (default): keeps the ML relevance ordering globally, but reorders only near-tied candidates (gap `<= --tiebreak-eps`) within the first `--tiebreak-topn` rows.
+- `lex`: full lexicographic sort by relevance + post features across all rows.
+- `blend`: computes a weighted final score.
+
+For `blend`, the score is:
+
+`final_score = (1 - post_weight) * relevance + post_weight * post_score`
+
+For `lex` and `tiebreak`, tie-break keys are applied in this deterministic order (descending):
+
+1. `brand_strength_exact`
+2. `top20_strength_form_exact`
+3. `brand_score`
+4. `rerank_top20`
+5. `strength_exact`
+6. `strength_sim`
+7. `form_route_score`
+8. `release_score`
 
 Pipeline steps per row:
 
@@ -190,7 +245,7 @@ thirawat infer bulk \
   --n-limit 100 \
   --rag-provider ollama \
   --ollama-base-url http://localhost:11434 \
-    --ollama-model "gpt-oss:20b"
+  --ollama-model "gpt-oss:20b"
 ```
 
 Ollama-specific flags:
@@ -199,7 +254,7 @@ Ollama-specific flags:
 --ollama-base-url URL          # default http://localhost:11434
 --ollama-model MODEL_TAG       # defaults to --rag-model value
 --ollama-timeout 120           # seconds
-    --ollama-keep-alive "5m"       # optional keep-alive hint sent to server
+--ollama-keep-alive "5m"       # optional keep-alive hint sent to server
 ```
 
 #### llama.cpp server (local HTTP API)
@@ -251,7 +306,6 @@ Set `OPENROUTER_API_KEY` in your environment; the CLI will refuse to call OpenRo
 #### Cloudflare Workers AI (remote)
 
 ```bash
-```bash
 export CLOUDFLARE_ACCOUNT_ID=<ACCOUNT_ID>
 export CLOUDFLARE_API_TOKEN=<API_TOKEN>
 
@@ -277,10 +331,10 @@ Cloudflare-specific flags:
 Set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in your environment before invoking the Cloudflare provider; the CLI reads only from those variables.
 
 - Models under `@cf/openai/*` (for example `@cf/openai/gpt-oss-120b`) use the Workers AI Responses API, so leave `--cloudflare-use-responses-api` enabled to send the prompt as an `input` payload.
-- Meta's `@cf/meta/llama-4-*` family is served via the `/ai/run/<model>` endpoint-pass `--no-cloudflare-use-responses-api` when targeting those models so the CLI emits the `messages` payload the endpoint expects.
+- Meta's `@cf/meta/llama-4-*` family is served via the `/ai/run/<model>` endpoint; pass `--no-cloudflare-use-responses-api` when targeting those models so the CLI emits the `messages` payload the endpoint expects.
 
 
-## Developement
+## Development
 
 ```bash
 # 1. Install dependencies into a local virtual environment (creates .venv/)
@@ -293,13 +347,22 @@ source .venv/bin/activate
 uv run python -m thirawat_mapper.index.build --help
 ```
 
-`uv sync` reads the project metadata and installs the required packages (PyTorch, LanceDB, transformers, etc.) against Python 3.11.x. Subsequent `uv run ...` invocations will reuse the same environment. Replace paths in the examples below to match your workspace. All text used for indexing and inference is normalized (lower-cased, whitespace collapsed) for stable matching.
+`uv sync` reads the project metadata and installs the required packages (PyTorch, LanceDB, transformers, etc.) against Python 3.10+. Subsequent `uv run ...` invocations will reuse the same environment. Replace paths in the examples below to match your workspace. All text used for indexing and inference is normalized (lower-cased, whitespace collapsed) for stable matching.
 
 
 ## Notes & Requirements
 
 - Vector-only retrieval + reranking (no FTS/BM25/hybrid in beta).
 - Text is normalized (lowercase + collapsed whitespace) for indexing and inference.
-- The reranker model `sidataplus/THIRAWAT-SapBERT` is a gated model on Hugging Face. You must request access on the model page (web) and login via the CLI before running; you can also point `--reranker-id` at a local ColBERT-style checkpoint (e.g., `models/nde_biolord`) without re-authenticating.
+- The reranker default is `sidataplus/THIRAWAT-SapBERT`. As verified on February 10, 2026 via the Hugging Face model API, this model is public (`gated=false`, `private=false`). If upstream access settings change later, authenticate with Hugging Face as needed.
 - LanceDB tables must expose a float32 fixed-size vector column (named `vector` when built with this CLI).
 - Index build keeps only standard, valid OMOP concepts (`standard_concept='S' AND invalid_reason IS NULL`).
+- This beta uses the `transformers` encoder path directly (no `--backend st` switch in this CLI).
+
+### Troubleshooting: SapBERT warning during startup
+
+You may see this warning while loading SapBERT-related components:
+
+`No sentence-transformers model found with name cambridgeltl/SapBERT-UMLS-2020AB-all-lang-from-XLMR.`
+
+In this project that warning is often benign fallback behavior when loading through `transformers`/ColBERT wrappers. Treat it as an error only when model loading or inference actually fails (for example, a raised exception, process exit, or no embeddings produced).
